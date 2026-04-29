@@ -1352,15 +1352,26 @@ footer.np-foot strong { color: var(--np-gold-500); }
   const KEY_TIER    = "neopets_tier";
 
   // ----------------------------------------------------------
-  // UUID — 8 char lowercase alphanumeric, matches iOS pattern
+  // Identity API — replaces local UUID generation
   // ----------------------------------------------------------
-  function generateExternalId() {
-    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-    const bytes = new Uint32Array(8);
-    crypto.getRandomValues(bytes);
-    let id = "";
-    for (let i = 0; i < 8; i++) id += alphabet[bytes[i] % alphabet.length];
-    return id;
+  const API_BASE = "https://onesignal-api-server-production-6bda.up.railway.app";
+  const APP_ID   = "4535c4ef-3ac5-4d09-901e-ba18c1082cba";
+
+  async function apiCall(method, path, body) {
+    const opts = {
+      method,
+      headers: { "Content-Type": "application/json" }
+    };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(API_BASE + path, opts);
+    const data = await res.json();
+    if (!res.ok) {
+      const err = new Error(data.detail || data.message || "API error");
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
   }
 
   // ----------------------------------------------------------
@@ -1509,7 +1520,7 @@ footer.np-foot strong { color: var(--np-gold-500); }
   // ----------------------------------------------------------
   // Register / Sign In / Logout
   // ----------------------------------------------------------
-  $("#form-register").addEventListener("submit", e => {
+  $("#form-register").addEventListener("submit", async e => {
     e.preventDefault();
     const errBox = $("#register-error");
     errBox.classList.remove("is-visible");
@@ -1524,58 +1535,113 @@ footer.np-foot strong { color: var(--np-gold-500); }
       return;
     }
 
-    const externalId = generateExternalId();
+    let apiUser;
+    try {
+      apiUser = await apiCall("POST", "/users/register", {
+        username: name, app_id: APP_ID
+      });
+    } catch (err) {
+      // Username already taken — offer to log in instead.
+      if (err.status === 409 || (err.data && /already/.test(err.data.detail || ""))) {
+        errBox.innerHTML =
+          'That username is taken. <button type="button" id="register-try-login" ' +
+          'style="color:var(--np-orange);text-decoration:underline;background:none;border:none;cursor:pointer;">' +
+          'Sign in instead?</button>';
+        errBox.classList.add("is-visible");
+        const loginBtn = document.getElementById("register-try-login");
+        if (loginBtn) loginBtn.addEventListener("click", async () => {
+          try {
+            apiUser = await apiCall("POST", "/users/login", {
+              username: name, app_id: APP_ID
+            });
+            finishAuth(apiUser, email, phone, false);
+          } catch (loginErr) {
+            errBox.textContent = loginErr.message || "Login failed. Please try again.";
+            errBox.classList.add("is-visible");
+          }
+        });
+        return;
+      }
+      errBox.textContent = err.message || "Registration failed. Please try again.";
+      errBox.classList.add("is-visible");
+      return;
+    }
+
+    finishAuth(apiUser, email, phone, true);
+  });
+
+  // Shared helper to complete auth after a successful register or login API call.
+  function finishAuth(apiUser, email, phone, isNewAccount) {
+    const externalId = apiUser.external_id;
+    const name       = apiUser.username;
     window.localStorage.setItem(KEY_UUID, externalId);
 
     const profile = {
       name, email, phone, externalId,
-      registeredAt: new Date().toISOString()
+      registeredAt: apiUser.created_at || new Date().toISOString()
     };
     window.localStorage.setItem(KEY_PROFILE, JSON.stringify(profile));
 
-    // Reset streak / tier for a fresh account.
-    state.streak = { lastClaimDate: null, days: 0 };
-    state.customTags = [];
-    window.localStorage.setItem(KEY_STREAK, JSON.stringify(state.streak));
-    window.localStorage.setItem(KEY_TAGS, JSON.stringify(state.customTags));
+    if (isNewAccount) {
+      // Reset streak / tier for a fresh account.
+      state.streak = { lastClaimDate: null, days: 0 };
+      state.customTags = [];
+      window.localStorage.setItem(KEY_STREAK, JSON.stringify(state.streak));
+      window.localStorage.setItem(KEY_TAGS, JSON.stringify(state.customTags));
+    } else {
+      // Restore streak / tags for returning user.
+      state.streak     = readJSON(KEY_STREAK) || { lastClaimDate: null, days: 0 };
+      state.customTags = readJSON(KEY_TAGS)   || [];
+    }
 
-    // OneSignal — login + optional contact channels + registration tags.
+    // OneSignal — login + optional contact channels + tags.
     osLogin(externalId);
     osAddEmail(email);
     osAddSms(phone);
-    osAddTags({
-      registration_year:    String(new Date().getFullYear()),
-      account_type:         "free",
-      player_level:         "beginner",
-      referral_source:      "organic",
-      newsletter_opted_in:  "false",
-      onboarding_completed: "true",
-      loyalty_tier:         "bronze",
-      neopoints_balance:    "2500",
-      nc_balance:           "150",
-      daily_streak_days:    "0",
-      last_login_date:      todayISO(),
-      last_played:          todayISO()
-    });
+
+    if (isNewAccount) {
+      osAddTags({
+        registration_year:    String(new Date().getFullYear()),
+        account_type:         "free",
+        player_level:         "beginner",
+        referral_source:      "organic",
+        newsletter_opted_in:  "false",
+        onboarding_completed: "true",
+        loyalty_tier:         "bronze",
+        neopoints_balance:    "2500",
+        nc_balance:           "150",
+        daily_streak_days:    "0",
+        last_login_date:      todayISO(),
+        last_played:          todayISO()
+      });
+    } else {
+      osAddTags({
+        last_login_date:        todayISO(),
+        last_played:            todayISO(),
+        days_since_last_login:  String(daysSince(state.streak.lastClaimDate))
+      });
+    }
 
     osTrack("user_login", {
       platform:              "web_app",
       device_type:           /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile_web" : "desktop",
       session_start_time:    new Date().toISOString(),
-      days_since_last_login: 0
+      days_since_last_login: isNewAccount ? 0 : daysSince(state.streak.lastClaimDate)
     });
 
     state.user     = profile;
     state.isAuthed = true;
-    state.tier     = "bronze";
+    state.tier     = isNewAccount ? "bronze" : tierForStreak(state.streak.days);
 
     closeAllModals();
     applyAuthState();
     showStitchBanner(email);
-    toast("Welcome to Neopia, " + name + "!");
-  });
+    toast(isNewAccount
+      ? "Welcome to Neopia, " + name + "!"
+      : "Signed in. Cross-device sync on.");
+  }
 
-  $("#form-signin").addEventListener("submit", e => {
+  $("#form-signin").addEventListener("submit", async e => {
     e.preventDefault();
     const errBox = $("#signin-error");
     errBox.classList.remove("is-visible");
@@ -1589,55 +1655,50 @@ footer.np-foot strong { color: var(--np-gold-500); }
       return;
     }
 
-    // Try to restore a previously-registered profile on this device. If
-    // there is none we'll generate a fresh externalId — the iOS profile
-    // gets merged in via the email channel either way.
-    const stored = readJSON(KEY_PROFILE);
-    let externalId = window.localStorage.getItem(KEY_UUID);
-    if (!externalId) {
-      externalId = generateExternalId();
-      window.localStorage.setItem(KEY_UUID, externalId);
+    let apiUser;
+    try {
+      apiUser = await apiCall("POST", "/users/login", {
+        username: name, app_id: APP_ID
+      });
+    } catch (err) {
+      // User not found — offer to register instead.
+      if (err.status === 404) {
+        errBox.innerHTML =
+          'No account found for that name. <button type="button" id="signin-try-register" ' +
+          'style="color:var(--np-orange);text-decoration:underline;background:none;border:none;cursor:pointer;">' +
+          'Create one?</button>';
+        errBox.classList.add("is-visible");
+        const regBtn = document.getElementById("signin-try-register");
+        if (regBtn) regBtn.addEventListener("click", () => {
+          closeAllModals();
+          $("#register-name").value = name;
+          $("#register-email").value = email;
+          openModal("modal-register");
+        });
+        return;
+      }
+      errBox.textContent = err.message || "Sign-in failed. Please try again.";
+      errBox.classList.add("is-visible");
+      return;
     }
 
-    const profile = {
-      name,
-      email,
-      phone:        stored ? stored.phone || "" : "",
-      externalId,
-      registeredAt: stored ? stored.registeredAt : new Date().toISOString()
-    };
-    window.localStorage.setItem(KEY_PROFILE, JSON.stringify(profile));
+    // Use the stored phone from localStorage if available.
+    const stored = readJSON(KEY_PROFILE);
+    const phone  = stored ? stored.phone || "" : "";
 
-    // Restore streak / tags.
-    state.streak     = readJSON(KEY_STREAK) || { lastClaimDate: null, days: 0 };
-    state.customTags = readJSON(KEY_TAGS)   || [];
-
-    osLogin(externalId);
-    osAddEmail(email);
-    if (profile.phone) osAddSms(profile.phone);
-    osAddTags({
-      last_login_date:        todayISO(),
-      last_played:            todayISO(),
-      days_since_last_login:  String(daysSince(state.streak.lastClaimDate))
-    });
-    osTrack("user_login", {
-      platform:              "web_app",
-      device_type:           /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile_web" : "desktop",
-      session_start_time:    new Date().toISOString(),
-      days_since_last_login: daysSince(state.streak.lastClaimDate)
-    });
-
-    state.user     = profile;
-    state.isAuthed = true;
-    state.tier     = tierForStreak(state.streak.days);
-
-    closeAllModals();
-    applyAuthState();
-    showStitchBanner(email);
-    toast("Signed in. Cross-device sync on.");
+    finishAuth(apiUser, email, phone, false);
   });
 
-  $("#btn-logout").addEventListener("click", () => {
+  $("#btn-logout").addEventListener("click", async () => {
+    const externalId = window.localStorage.getItem(KEY_UUID);
+
+    // Call server-side logout (fire-and-forget — don't block UI on failure).
+    if (externalId) {
+      apiCall("POST", "/users/logout", {
+        external_id: externalId, app_id: APP_ID
+      }).catch(err => console.warn("[API] logout error:", err.message));
+    }
+
     osLogout();
     window.localStorage.removeItem(KEY_UUID);
     window.localStorage.removeItem(KEY_PROFILE);
@@ -1896,10 +1957,23 @@ footer.np-foot strong { color: var(--np-gold-500); }
   // ----------------------------------------------------------
   // Session restore — runs on load
   // ----------------------------------------------------------
-  function restoreSession() {
+  async function restoreSession() {
     const externalId = window.localStorage.getItem(KEY_UUID);
     const profile    = readJSON(KEY_PROFILE);
+
     if (externalId && profile) {
+      // Verify the stored external_id is still valid on the server.
+      try {
+        await apiCall("GET", "/users/" + encodeURIComponent(externalId));
+      } catch (err) {
+        // User no longer valid on the server — clear local state.
+        console.warn("[API] session restore failed:", err.message);
+        window.localStorage.removeItem(KEY_UUID);
+        window.localStorage.removeItem(KEY_PROFILE);
+        applyAuthState();
+        return;
+      }
+
       state.user       = profile;
       state.isAuthed   = true;
       state.streak     = readJSON(KEY_STREAK) || { lastClaimDate: null, days: 0 };
