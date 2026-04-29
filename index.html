@@ -1292,15 +1292,18 @@ footer.np-foot strong { color: var(--np-gold-500); }
   }
 
   // ----------------------------------------------------------
-  // Push subscription — surfaces an anonymous user record in
-  // the OneSignal dashboard before any sign-in occurs.
+  // Push subscription — only offered to LOGGED-IN users. The button stays
+  // hidden for anonymous visitors so the opt-in is gated behind sign-in.
+  // (Anonymous users are still captured in OneSignal via init() + the env
+  // tags fired at boot — they just don't get the push permission prompt.)
   // ----------------------------------------------------------
   function syncSubscribeButton() {
     withOneSignal(OneSignal => {
       const granted = !!OneSignal.Notifications.permission;
       const btn = document.getElementById("hero-cta-subscribe");
       if (!btn) return;
-      btn.hidden = granted;
+      // Hide unless: user is authed AND permission is not yet granted.
+      btn.hidden = granted || !state.isAuthed;
       if (granted) {
         OneSignal.User.addTags({ push_opted_in: "true" });
       }
@@ -1377,13 +1380,13 @@ footer.np-foot strong { color: var(--np-gold-500); }
   // Daily reward table — one entry per day-in-streak
   // ----------------------------------------------------------
   const STREAK_REWARDS = [
-    { day: 1, label: "100 NP",   np: 100 },
-    { day: 2, label: "150 NP",   np: 150 },
-    { day: 3, label: "Mystery",  np: 250 },
-    { day: 4, label: "300 NP",   np: 300 },
-    { day: 5, label: "400 NP",   np: 400 },
-    { day: 6, label: "500 NP",   np: 500 },
-    { day: 7, label: "Faerie",   np: 1000 }
+    { day: 1, label: "100 NP",   np: 100,  type: "neopoints"  },
+    { day: 2, label: "150 NP",   np: 150,  type: "neopoints"  },
+    { day: 3, label: "Mystery",  np: 250,  type: "mystery_box"},
+    { day: 4, label: "300 NP",   np: 300,  type: "neopoints"  },
+    { day: 5, label: "400 NP",   np: 400,  type: "neopoints"  },
+    { day: 6, label: "500 NP",   np: 500,  type: "neopoints"  },
+    { day: 7, label: "Faerie",   np: 1000, type: "faerie_item"}
   ];
 
   // ----------------------------------------------------------
@@ -1454,6 +1457,13 @@ footer.np-foot strong { color: var(--np-gold-500); }
     $$(".np-nav__item").forEach(b => b.classList.toggle("is-active", b.dataset.route === route));
     $$(".np-screen").forEach(s => s.classList.toggle("is-active", s.dataset.screen === route));
     window.scrollTo({ top: 0, behavior: "smooth" });
+    // Fires for anonymous AND authed users — anonymous events attach to the
+    // OneSignal anonymous user created on init(), and persist after login.
+    osTrack("screen_viewed", {
+      screen_name: route,
+      is_authed:   state.isAuthed ? "true" : "false",
+      timestamp:   new Date().toISOString()
+    });
   }
   document.body.addEventListener("click", e => {
     const t = e.target.closest("[data-route]");
@@ -1487,8 +1497,9 @@ footer.np-foot strong { color: var(--np-gold-500); }
   $("#link-to-register").addEventListener("click",  () => openModal("modal-register"));
   $("#link-to-signin").addEventListener("click",    () => openModal("modal-signin"));
 
-  // Push subscribe — anonymous users can opt in before any login,
-  // which materializes their record in OneSignal → Audience → Users.
+  // Push subscribe — gated to authed users. The button is hidden until the
+  // user has logged in (see syncSubscribeButton()). Anonymous capture still
+  // happens automatically via OneSignal.init() + env tags at boot.
   $("#hero-cta-subscribe").addEventListener("click", requestPushPermission);
 
   // Account
@@ -1535,7 +1546,7 @@ footer.np-foot strong { color: var(--np-gold-500); }
     osAddTags({
       registration_year:    String(new Date().getFullYear()),
       account_type:         "free",
-      user_level:           "beginner",
+      player_level:         "beginner",
       referral_source:      "organic",
       newsletter_opted_in:  "false",
       onboarding_completed: "true",
@@ -1543,7 +1554,8 @@ footer.np-foot strong { color: var(--np-gold-500); }
       neopoints_balance:    "2500",
       nc_balance:           "150",
       daily_streak_days:    "0",
-      last_login_date:      todayISO()
+      last_login_date:      todayISO(),
+      last_played:          todayISO()
     });
 
     osTrack("user_login", {
@@ -1605,6 +1617,7 @@ footer.np-foot strong { color: var(--np-gold-500); }
     if (profile.phone) osAddSms(profile.phone);
     osAddTags({
       last_login_date:        todayISO(),
+      last_played:            todayISO(),
       days_since_last_login:  String(daysSince(state.streak.lastClaimDate))
     });
     osTrack("user_login", {
@@ -1722,12 +1735,15 @@ footer.np-foot strong { color: var(--np-gold-500); }
     osAddTags({
       daily_streak_days: String(state.streak.days),
       last_login_date:   today,
+      last_played:       today,
       neopoints_balance: String(2500 + state.streak.days * 100),
       loyalty_tier:      newTier
     });
     osTrack("daily_reward_claimed", {
       day_in_streak: dayInStreak,
-      reward_name:   reward.label
+      streak_days:   state.streak.days,
+      reward_name:   reward.label,
+      reward_type:   reward.type
     });
 
     renderHomeForUser();
@@ -1759,6 +1775,7 @@ footer.np-foot strong { color: var(--np-gold-500); }
       return;
     }
     osTrack("reward_redeemed", {
+      reward_id:     reward.id,
       reward_name:   reward.name,
       points_cost:   reward.points,
       tier_required: reward.tier
@@ -1895,6 +1912,7 @@ footer.np-foot strong { color: var(--np-gold-500); }
       if (profile.phone) osAddSms(profile.phone);
       osAddTags({
         last_login_date:        todayISO(),
+        last_played:            todayISO(),
         days_since_last_login:  String(daysSince(state.streak.lastClaimDate)),
         loyalty_tier:           state.tier,
         daily_streak_days:      String(state.streak.days)
