@@ -43,6 +43,13 @@
       const q = window.__neopets_sdk_queue.splice(0);
       q.forEach(fn => { try { fn(OneSignal); } catch (e) { console.error(e); } });
     }
+    // Surface the "Get reward alerts" button if the visitor hasn't
+    // already granted push permission. Update on every change.
+    try { window.__neopets_syncSubscribe && window.__neopets_syncSubscribe(); } catch (e) {}
+    OneSignal.Notifications.addEventListener("permissionChange", granted => {
+      console.log("%c[OneSignal] permissionChange → " + granted, "color:#FF7A00;font-weight:700;");
+      try { window.__neopets_syncSubscribe && window.__neopets_syncSubscribe(); } catch (e) {}
+    });
   });
 </script>
 
@@ -906,6 +913,9 @@ footer.np-foot strong { color: var(--np-gold-500); }
           <button class="np-pill np-pill--gold np-when-authed" data-route="daily">
             Claim Today's Reward
           </button>
+          <button class="np-pill np-pill--grape" id="hero-cta-subscribe" hidden>
+            🔔 Get reward alerts
+          </button>
         </div>
       </div>
     </div>
@@ -1282,6 +1292,54 @@ footer.np-foot strong { color: var(--np-gold-500); }
   }
 
   // ----------------------------------------------------------
+  // Push subscription — surfaces an anonymous user record in
+  // the OneSignal dashboard before any sign-in occurs.
+  // ----------------------------------------------------------
+  function syncSubscribeButton() {
+    withOneSignal(OneSignal => {
+      const granted = !!OneSignal.Notifications.permission;
+      const btn = document.getElementById("hero-cta-subscribe");
+      if (!btn) return;
+      btn.hidden = granted;
+      if (granted) {
+        OneSignal.User.addTags({ push_opted_in: "true" });
+      }
+    });
+  }
+  // Expose to the deferred-init block at the top of the page.
+  window.__neopets_syncSubscribe = syncSubscribeButton;
+
+  async function requestPushPermission() {
+    if (!window.__neopets_sdk_ready || !window.OneSignal) {
+      toast("OneSignal SDK still loading — try again in a moment.");
+      return;
+    }
+    const OneSignal = window.OneSignal;
+    if (OneSignal.Notifications.permission) {
+      toast("Already subscribed to push.");
+      syncSubscribeButton();
+      return;
+    }
+    console.log("%c[OneSignal] requestPermission()", "color:#FF7A00;font-weight:700;");
+    try {
+      await OneSignal.Notifications.requestPermission();
+      const granted = !!OneSignal.Notifications.permission;
+      console.log("%c[OneSignal] permission result: " + granted, "color:#FF7A00;font-weight:700;");
+      if (granted) {
+        OneSignal.User.addTags({ push_opted_in: "true" });
+        toast("Subscribed! Check OneSignal → Audience → Users.");
+      } else {
+        OneSignal.User.addTags({ push_opted_in: "false" });
+        toast("Permission dismissed.");
+      }
+      syncSubscribeButton();
+    } catch (e) {
+      console.error("[OneSignal] permission request failed", e);
+      toast("Couldn't request permission — see console.");
+    }
+  }
+
+  // ----------------------------------------------------------
   // Storage keys
   // ----------------------------------------------------------
   const KEY_UUID    = "onesignal_user_uuid";
@@ -1428,6 +1486,10 @@ footer.np-foot strong { color: var(--np-gold-500); }
   $("#btn-show-signin").addEventListener("click",   () => openModal("modal-signin"));
   $("#link-to-register").addEventListener("click",  () => openModal("modal-register"));
   $("#link-to-signin").addEventListener("click",    () => openModal("modal-signin"));
+
+  // Push subscribe — anonymous users can opt in before any login,
+  // which materializes their record in OneSignal → Audience → Users.
+  $("#hero-cta-subscribe").addEventListener("click", requestPushPermission);
 
   // Account
   $("#btn-open-account").addEventListener("click",  () => state.isAuthed && openModal("modal-account"));
@@ -1799,6 +1861,7 @@ footer.np-foot strong { color: var(--np-gold-500); }
     renderStreakGrid();
     renderRewardsGrid();
     renderTagHistory();
+    syncSubscribeButton();
   }
 
   // ----------------------------------------------------------
