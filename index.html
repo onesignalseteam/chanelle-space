@@ -23,16 +23,20 @@
 <script>
   window.OneSignalDeferred = window.OneSignalDeferred || [];
   OneSignalDeferred.push(async function(OneSignal) {
+    console.log("%c[OneSignal] init starting…", "color:#8E32EC;font-weight:700;");
     await OneSignal.init({
       appId: "4535c4ef-3ac5-4d09-901e-ba18c1082cba",
       serviceWorkerPath: "OneSignalSDKWorker.js",
       allowLocalhostAsSecureOrigin: true
     });
+    console.log("%c[OneSignal] init complete — anonymous session live", "color:#8E32EC;font-weight:700;");
     // Static environment tags — set once on every visit, anonymous or not.
-    OneSignal.User.addTags({
+    const envTags = {
       game_platform:    "web_app",
       preferred_device: /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile_web" : "desktop"
-    });
+    };
+    console.log("[OneSignal] addTags()", envTags);
+    OneSignal.User.addTags(envTags);
     // Replay any auth/SDK calls that fired before the SDK finished booting.
     window.__neopets_sdk_ready = true;
     if (Array.isArray(window.__neopets_sdk_queue)) {
