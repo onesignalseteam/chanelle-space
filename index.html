@@ -714,6 +714,22 @@ body.is-authed #btn-open-auth   { display: none; }
           </div>
         </form>
 
+        <!-- Neopet companion — drives the neopet_name tag.
+             The dropdown is populated from THEME_CONFIG.companions. -->
+        <form id="form-neopet" class="np-account-form">
+          <div class="np-account-form__title" id="neopet-title">My Companion</div>
+          <div class="np-account-form__row">
+            <div class="np-field">
+              <select class="np-field__input" id="neopet-select">
+                <option value="">— None selected —</option>
+                <!-- options injected by applyTheme() from THEME_CONFIG.companions -->
+              </select>
+              <div class="np-field__hint" id="neopet-hint">Saving fires OneSignal.User.addTags({ neopet_name: "..." }).</div>
+            </div>
+            <button type="submit" class="np-pill np-pill--grape np-pill--small">Save</button>
+          </div>
+        </form>
+
         <!-- Premium upgrade — toggles the account_type tag between
              "free" and "premium" so the SE can demo both states. -->
         <div class="np-account-form" id="premium-card">
@@ -898,6 +914,20 @@ body.is-authed #btn-open-auth   { display: none; }
     setText("btn-logout",            copy.logoutCta         || "Log out");
     setText("btn-upgrade-premium",   copy.upgradePremiumCta || "Upgrade to Premium");
     setText("premium-hint",          copy.upgradePremiumHint || "");
+    setText("neopet-title",          copy.neopetTitle        || "My Companion");
+    setText("neopet-hint",           copy.neopetHint         || "");
+
+    // Populate the companion dropdown from THEME_CONFIG.companions
+    var sel = document.getElementById("neopet-select");
+    if (sel) {
+      var emptyLabel = copy.neopetEmptyOption || "— None selected —";
+      var companions = (cfg.companions || []);
+      sel.innerHTML = '<option value="">' + emptyLabel + '</option>' +
+        companions.map(function (c) {
+          return '<option value="' + c + '">' + c + '</option>';
+        }).join("");
+      sel.value = state.neopetName || "";
+    }
 
     // --- footer + theme indicator
     setText("footer-note",  copy.footerNote || "");
@@ -1062,6 +1092,7 @@ body.is-authed #btn-open-auth   { display: none; }
   var KEY_PLAYERLVL  = "demo_player_lvl_" + slug;    // player_level integer
   var KEY_FIRSTGAME  = "demo_firstgame_"  + slug;    // "true" once first game session completes
   var KEY_PREMIUM    = "demo_premium_"    + slug;    // "true" if account_type is "premium"
+  var KEY_NEOPET     = "demo_neopet_"     + slug;    // chosen Neopet companion name
 
   // ===========================================================
   // App state
@@ -1077,6 +1108,7 @@ body.is-authed #btn-open-auth   { display: none; }
     playerLevel: 1,                                  // player_level value
     firstGameDone: false,                            // toggles after game_session_completed; gates show_prompt trigger
     isPremium: false,                                // toggles account_type tag between "free" and "premium"
+    neopetName: "",                                  // neopet_name tag value (the chosen companion)
     quest: { sacrificed: [], totalNeeded: 0, completed: false }
   };
 
@@ -1086,8 +1118,9 @@ body.is-authed #btn-open-auth   { display: none; }
   // narrow:
   //   • player_level     — current level/progression marker
   //   • currency_balance — primary currency balance
-  //   • last_played      — YYYY-MM-DD of the most recent session
+  //   • last_played      — UNIX timestamp (seconds since epoch) of the most recent session
   //   • account_type     — "free" or "premium"
+  //   • neopet_name      — chosen companion (Edric's specific ask)
   // No other addTags() calls should be made from this app code.
   // ===========================================================
   function setPlayerLevel(level) {
@@ -1106,14 +1139,32 @@ body.is-authed #btn-open-auth   { display: none; }
     if (state.balance < threshold) osAddTrigger("low_currency", "true");
     if (reason) console.log("[balance]", reason, "→", state.balance);
   }
-  function setLastPlayedToday() {
-    osAddTags({ last_played: todayISO() });
+  function setLastPlayedNow() {
+    // UNIX timestamp in seconds (standard format). If you ever need
+    // milliseconds, swap for: String(Date.now())
+    var unixSeconds = Math.floor(Date.now() / 1000);
+    osAddTags({ last_played: String(unixSeconds) });
   }
   function setAccountType(type) {
     state.isPremium = type === "premium";
     window.localStorage.setItem(KEY_PREMIUM, state.isPremium ? "true" : "false");
     osAddTags({ account_type: type });
     renderPremiumState();
+  }
+  function setNeopetName(name) {
+    state.neopetName = name || "";
+    if (state.neopetName) {
+      window.localStorage.setItem(KEY_NEOPET, state.neopetName);
+      osAddTags({ neopet_name: state.neopetName });
+    } else {
+      window.localStorage.removeItem(KEY_NEOPET);
+      // Empty string "clears" the tag in OneSignal's segmentation
+      // (truthy filters won't match). To fully delete the tag, the
+      // SE can use OneSignal.User.removeTag("neopet_name") in the
+      // dashboard or via REST.
+      osAddTags({ neopet_name: "" });
+    }
+    renderNeopetState();
   }
 
   // ===========================================================
@@ -1301,10 +1352,12 @@ body.is-authed #btn-open-auth   { display: none; }
       var initialBalance = ((window.THEME_CONFIG && window.THEME_CONFIG.economy && window.THEME_CONFIG.economy.initialBalance) | 0) || 2500;
       setPlayerLevel(1);                   // player_level
       setCurrencyBalance(initialBalance);  // currency_balance
-      setLastPlayedToday();                // last_played
+      setLastPlayedNow();                // last_played
       setAccountType("free");              // account_type
+      state.neopetName = "";               // neopet_name — left empty until user picks one
       state.firstGameDone = false;
       window.localStorage.removeItem(KEY_FIRSTGAME);
+      window.localStorage.removeItem(KEY_NEOPET);
     } else {
       // Returning user: rehydrate from storage, then re-emit the tags so
       // they're synced on the OneSignal side after the login() call.
@@ -1312,10 +1365,12 @@ body.is-authed #btn-open-auth   { display: none; }
       state.playerLevel   = parseInt(window.localStorage.getItem(KEY_PLAYERLVL) || "1", 10);
       state.isPremium     = window.localStorage.getItem(KEY_PREMIUM)   === "true";
       state.firstGameDone = window.localStorage.getItem(KEY_FIRSTGAME) === "true";
+      state.neopetName    = window.localStorage.getItem(KEY_NEOPET)    || "";
       setPlayerLevel(state.playerLevel);
       setCurrencyBalance(state.balance);
-      setLastPlayedToday();
+      setLastPlayedNow();
       setAccountType(state.isPremium ? "premium" : "free");
+      if (state.neopetName) setNeopetName(state.neopetName);   // re-emit only if set
     }
 
     closeAllModals();
@@ -1335,6 +1390,7 @@ body.is-authed #btn-open-auth   { display: none; }
     state.balance     = 0;
     state.playerLevel = 1;
     state.isPremium   = false;
+    state.neopetName  = "";
     state.quest       = { sacrificed: [], totalNeeded: 0, completed: false };
     closeAllModals();
     applyAuthState();
@@ -1360,6 +1416,13 @@ body.is-authed #btn-open-auth   { display: none; }
     osAddSms(phone);
     state.user.phone = phone; persistProfile();
     toast("Mobile saved → addSms() fired.");
+  });
+  $("#form-neopet").addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in first."); return; }
+    var name = $("#neopet-select").value;
+    setNeopetName(name);
+    toast(name ? ("Companion saved → addTags({ neopet_name: \"" + name + "\" })") : "Companion cleared.");
   });
   // Custom-tag form — this still calls addTags() with a free-form key/value
   // because that's the SE-skill-mandated SE demo affordance. The four named
@@ -1407,7 +1470,7 @@ body.is-authed #btn-open-auth   { display: none; }
 
     // Tag updates (only the 4 customer tags):
     setCurrencyBalance(state.balance + reward.amount, "daily_reward_claim");
-    setLastPlayedToday();
+    setLastPlayedNow();
 
     // Event with the exact property schema requested:
     osTrack("daily_reward_claimed", {
@@ -1476,7 +1539,7 @@ body.is-authed #btn-open-auth   { display: none; }
       // Tag updates (only customer schema):
       setPlayerLevel(state.playerLevel + 1);                          // player_level
       setCurrencyBalance(state.balance + pointsEarned, "game_win");   // currency_balance
-      setLastPlayedToday();                                           // last_played
+      setLastPlayedNow();                                           // last_played
       toast("Trial complete! +" + pointsEarned + " " + currencySymbol);
     }
 
@@ -1560,7 +1623,7 @@ body.is-authed #btn-open-auth   { display: none; }
     // Reward the user — currency_balance + last_played + player_level updates.
     var bonus = (qp.rewardCurrency | 0) || 0;
     if (bonus > 0) setCurrencyBalance(state.balance + bonus, "quest_completed");
-    setLastPlayedToday();
+    setLastPlayedNow();
     setPlayerLevel(state.playerLevel + 1);
     state.quest.completed = true;
     toast("Quest complete! Earned " + (qp.rewardName || "reward") + (bonus ? " + " + bonus + " currency." : "."));
@@ -1570,6 +1633,22 @@ body.is-authed #btn-open-auth   { display: none; }
   // ===========================================================
   // Premium upgrade — toggles account_type tag.
   // ===========================================================
+  // ===========================================================
+  // Neopet companion render — keeps the dropdown + nav chip in
+  // sync with state.neopetName.
+  // ===========================================================
+  function renderNeopetState() {
+    var sel = document.getElementById("neopet-select");
+    if (sel) sel.value = state.neopetName || "";
+    // Update the nav chip — appends "· {neopetName}" when set.
+    if (state.isAuthed && state.user) {
+      var copy = (window.THEME_CONFIG && window.THEME_CONFIG.copy) || {};
+      var label = (copy.accountChipPrefix || "Hi,") + " " + state.user.name;
+      if (state.neopetName) label += " · " + state.neopetName;
+      setText("account-chip-name", label);
+    }
+  }
+
   function renderPremiumState() {
     var statusEl = document.getElementById("premium-status-text");
     var upgrade  = document.getElementById("btn-upgrade-premium");
@@ -1628,7 +1707,7 @@ body.is-authed #btn-open-auth   { display: none; }
     // Spend — setCurrencyBalance() handles the addTags() update AND
     // fires the low_currency trigger if the new balance < threshold.
     setCurrencyBalance(state.balance - reward.points, "item_purchased:" + reward.id);
-    setLastPlayedToday();
+    setLastPlayedNow();
 
     toast("Redeemed " + reward.name + "!");
   }
@@ -1746,6 +1825,7 @@ body.is-authed #btn-open-auth   { display: none; }
     renderTagHistory();
     renderQuest();
     renderPremiumState();
+    renderNeopetState();
     syncSubscribeButton();
   }
 
@@ -1782,18 +1862,20 @@ body.is-authed #btn-open-auth   { display: none; }
       state.playerLevel   = parseInt(window.localStorage.getItem(KEY_PLAYERLVL) || "1", 10);
       state.firstGameDone = window.localStorage.getItem(KEY_FIRSTGAME) === "true";
       state.isPremium     = window.localStorage.getItem(KEY_PREMIUM)   === "true";
+      state.neopetName    = window.localStorage.getItem(KEY_NEOPET)    || "";
 
       // Re-stitch identity on every load.
       osLogin(externalId);
       if (profile.email) osAddEmail(profile.email);
       if (profile.phone) osAddSms(profile.phone);
 
-      // Re-emit only the four customer tags so they're synced after login.
+      // Re-emit the customer tags so they're synced after login.
       // No user_login event — that name isn't in the customer's schema.
       setPlayerLevel(state.playerLevel);
       setCurrencyBalance(state.balance);
-      setLastPlayedToday();
+      setLastPlayedNow();
       setAccountType(state.isPremium ? "premium" : "free");
+      if (state.neopetName) setNeopetName(state.neopetName);
     }
 
     renderGames();

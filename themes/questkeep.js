@@ -130,6 +130,10 @@ window.THEME_CONFIG = {
     questCompleteCta:    "Complete quest",
     questCompletedNote:  "Quest complete — fired the quest_completed event.",
 
+    neopetTitle:         "My Companion",
+    neopetHint:          "Saving fires OneSignal.User.addTags({ neopet_name: \"...\" }).",
+    neopetEmptyOption:   "— None selected —",
+
     footerNote:          "QuestKeep is a fictional demo brand built for OneSignal walkthroughs.",
     stitchBanner:        "Anonymous session stitched to your authenticated identity. All previously collected tags now belong to your QuestKeep user."
   },
@@ -186,6 +190,18 @@ window.THEME_CONFIG = {
     sacrificeItems:   ["Acorn Charm", "Silver Bell", "Moon Pebble"],
     rewardCurrency:   400
   },
+
+  /* companions — preset list for the neopet_name tag dropdown.
+     Each entry becomes both the displayed label AND the value sent
+     to OneSignal as the neopet_name tag. */
+  companions: [
+    "Faerie Wisp",
+    "Cloud Sprite",
+    "Royal Lupin",
+    "Plushie Otter",
+    "Shadow Korbat",
+    "Glowing Kiko"
+  ],
 
   /* economy — initial balances + low-currency trigger threshold */
   economy: {

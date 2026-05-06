@@ -134,6 +134,10 @@ window.THEME_CONFIG = {
     questCompleteCta:    "Complete quest",
     questCompletedNote:  "Quest complete — fired the quest_completed event.",
 
+    neopetTitle:         "My Companion",
+    neopetHint:          "Saving fires OneSignal.User.addTags({ neopet_name: \"...\" }).",
+    neopetEmptyOption:   "— None selected —",
+
     footerNote:          "REPLACE_ME footer note.",
     stitchBanner:        "Anonymous session stitched to your authenticated identity."
   },
@@ -191,6 +195,14 @@ window.THEME_CONFIG = {
     sacrificeItems:   ["Item A", "Item B", "Item C"],
     rewardCurrency:   400
   },
+
+  /* companions — preset list for the neopet_name tag dropdown */
+  companions: [
+    "Companion A",
+    "Companion B",
+    "Companion C",
+    "Companion D"
+  ],
 
   /* economy — initial balance + threshold for the low_currency In-App trigger */
   economy: {
