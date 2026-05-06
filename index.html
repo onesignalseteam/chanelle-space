@@ -3,1531 +3,1210 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Neopets — Welcome Back to Neopia</title>
-<meta name="description" content="Neopets web companion demo — daily rewards, loyalty perks, and Neopoints, synced across devices via OneSignal.">
-<link rel="icon" href="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png" type="image/png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<!-- Title + favicon are theme-agnostic placeholders.
+     applyTheme() rewrites both at boot once THEME_CONFIG loads. -->
+<title>Gaming Demo</title>
+<link id="theme-favicon" rel="icon" href="">
+<meta id="theme-description" name="description" content="">
 
 <!--
-  OneSignal Web SDK — standard initialisation script.
-  The App ID lives ONLY here. Do not reference it from app code; the rest of
-  the page interacts with OneSignal through the deferred queue and through
-  helper functions, never by re-stating the App ID.
-  This App ID is shared with the iOS companion at
-  github-repos/chanelle_mobile_app_ios so the two surfaces resolve to the same
-  OneSignal project — the prerequisite for cross-device identity stitching.
+  STEP A — load the THEME_CONFIG.
+  ?theme=<slug> picks themes/<slug>.js. Default: questkeep.
+  This script must run BEFORE the inline OneSignal block below so
+  applyTheme() can wire CSS vars before first paint.
+-->
+<script>
+  (function () {
+    "use strict";
+    var params = new URLSearchParams(location.search);
+    var slug   = (params.get("theme") || "questkeep").replace(/[^a-z0-9_-]/gi, "");
+    var s = document.createElement("script");
+    s.src   = "themes/" + slug + ".js";
+    s.async = false;                             // preserve order vs main script
+    s.onerror = function () {
+      // Fall back to default if the requested theme 404s.
+      console.warn("[theme] " + slug + " failed to load — falling back to questkeep");
+      var fb = document.createElement("script");
+      fb.src   = "themes/questkeep.js";
+      fb.async = false;
+      document.head.appendChild(fb);
+    };
+    document.head.appendChild(s);
+  })();
+</script>
+
+<!-- Google Fonts (preconnect helps the request go in parallel with theme load).
+     The actual fonts list is in THEME_CONFIG.fonts.googleFontHref and is
+     loaded by applyTheme() once the theme module resolves. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link id="theme-fonts" rel="stylesheet" href="">
+
+<!--
+  STEP B — OneSignal Web SDK init.
+
+  IMPORTANT — the visitor flow this brief verifies:
+
+    1. Page load → OneSignal.init() bootstraps an anonymous session
+    2. While anonymous → OneSignal.User.addTags(envTags) attaches
+       environment metadata (device, theme slug, vertical) to the
+       anonymous identity
+    3. Later, when the visitor authenticates → osLogin(externalId)
+       is called from the auth flow, which invokes
+       OneSignal.login(externalId) so OneSignal stitches the
+       anonymous session and its tags onto the authenticated user.
+
+  The deferred queue + the `__os_sdk_ready` flag below guarantee that
+  any osLogin() call placed by app code BEFORE init() resolves is
+  queued and only runs AFTER step 2 has fired.
 -->
 <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
 <script>
   window.OneSignalDeferred = window.OneSignalDeferred || [];
-  OneSignalDeferred.push(async function(OneSignal) {
-    console.log("%c[OneSignal] init starting…", "color:#8E32EC;font-weight:700;");
+  OneSignalDeferred.push(async function (OneSignal) {
+    var APP_ID = "4535c4ef-3ac5-4d09-901e-ba18c1082cba";   // shared with iOS companion
+    console.log("%c[OneSignal] init starting…", "color:#6B3FBE;font-weight:700;");
+
+    // (1) Bootstrap OneSignal — this creates an anonymous session.
     await OneSignal.init({
-      appId: "4535c4ef-3ac5-4d09-901e-ba18c1082cba",
+      appId: APP_ID,
       serviceWorkerPath: "OneSignalSDKWorker.js",
       allowLocalhostAsSecureOrigin: true
     });
-    console.log("%c[OneSignal] init complete — anonymous session live", "color:#8E32EC;font-weight:700;");
-    // Static environment tags — set once on every visit, anonymous or not.
-    const envTags = {
+    console.log("%c[OneSignal] init complete — anonymous session live", "color:#6B3FBE;font-weight:700;");
+
+    // (2) Anonymous-session env tags. Fire IMMEDIATELY after init so
+    //     they attach to the anonymous identity created above. These
+    //     persist through the eventual login() and demonstrate the
+    //     identity-stitching flow. NOTE: these are environment tags
+    //     scoped to the anonymous session; they are intentionally
+    //     separate from the customer-facing user-tag schema (those
+    //     four — player_level / currency_balance / last_played /
+    //     account_type — are set in finishAuth() once the user
+    //     authenticates).
+    var envTags = {
       game_platform:    "web_app",
       preferred_device: /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile_web" : "desktop"
     };
-    console.log("[OneSignal] addTags()", envTags);
+    console.log("[OneSignal] addTags() (anonymous)", envTags);
     OneSignal.User.addTags(envTags);
-    // Replay any auth/SDK calls that fired before the SDK finished booting.
-    window.__neopets_sdk_ready = true;
-    if (Array.isArray(window.__neopets_sdk_queue)) {
-      const q = window.__neopets_sdk_queue.splice(0);
-      q.forEach(fn => { try { fn(OneSignal); } catch (e) { console.error(e); } });
+
+    // (3) Drain any auth/SDK calls (e.g. osLogin) that fired before
+    //     the SDK was ready. The withOneSignal() helper below pushes
+    //     them onto __os_sdk_queue while __os_sdk_ready is false.
+    window.__os_sdk_ready = true;
+    if (Array.isArray(window.__os_sdk_queue)) {
+      var q = window.__os_sdk_queue.splice(0);
+      q.forEach(function (fn) { try { fn(OneSignal); } catch (e) { console.error(e); } });
     }
-    // Surface the "Get reward alerts" button if the visitor hasn't
-    // already granted push permission. Update on every change.
-    try { window.__neopets_syncSubscribe && window.__neopets_syncSubscribe(); } catch (e) {}
-    OneSignal.Notifications.addEventListener("permissionChange", granted => {
-      console.log("%c[OneSignal] permissionChange → " + granted, "color:#FF7A00;font-weight:700;");
-      try { window.__neopets_syncSubscribe && window.__neopets_syncSubscribe(); } catch (e) {}
+
+    try { window.__app_syncSubscribe && window.__app_syncSubscribe(); } catch (_) {}
+    OneSignal.Notifications.addEventListener("permissionChange", function (granted) {
+      console.log("%c[OneSignal] permissionChange → " + granted, "color:#F5A623;font-weight:700;");
+      try { window.__app_syncSubscribe && window.__app_syncSubscribe(); } catch (_) {}
     });
   });
 </script>
 
 <style>
-/* ===========================================================
-   Neopets brand tokens — extracted live from neopets.com via
-   the iOS companion's Theme.swift (`--np-*` CSS custom props).
-   =========================================================== */
+/* =============================================================
+   CSS variables — every visible style binds to one of these.
+   applyTheme() rewrites these at boot from THEME_CONFIG.colors.
+   The defaults below are placeholders for the brief flash before
+   the theme module loads — they roughly match QuestKeep so the
+   first paint isn't jarring even if the theme fails to load.
+   ============================================================= */
 :root {
-  --np-grape-500:      #8E32EC;   /* primary CTA / wordmark */
-  --np-grape-800:      #36287D;   /* deep accents, dark pills */
-  --np-grape-100:      #F1E6FE;   /* light wash for backgrounds */
-  --np-baby-blue:      #00A3EB;
-  --np-baby-blue-dark: #2BB1D6;
-  --np-orange-500:     #FF7A00;   /* punchy CTA */
-  --np-gold-500:       #FFCC00;   /* currency / highlight */
-  --np-strawberry-500: #E58FCC;   /* faerie / event accent */
-  --np-strawberry-100: #FCE7F3;
-  --np-lime-300:       #4DDA52;   /* NC / success */
-  --np-peach:          #F6CDB1;
-  --np-slate-100:      #F2F2F2;
-  --np-slate-400:      #BABABA;
-  --np-slate-700:      #6B6B6B;
-  --np-slate-800:      #454545;
-  --np-error:          #E63946;
-  --np-white:          #FFFFFF;
-  --np-cream-card:     rgba(255, 204, 0, 0.18);
-  --np-shadow-card:    0 6px 18px rgba(54, 40, 125, 0.10);
-  --np-shadow-pop:     0 12px 32px rgba(54, 40, 125, 0.18);
-  --np-radius-pill:    28px;
-  --np-radius-card:    16px;
-  --np-radius-inset:   12px;
-  --font-display:      "Fredoka", "Cafeteria", "SF Pro Rounded", system-ui, sans-serif;
-  --font-body:         "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --gradient-purple:   linear-gradient(0deg, var(--np-peach) 0%, var(--np-strawberry-500) 55%, var(--np-grape-500) 100%);
-  --gradient-orange:   linear-gradient(0deg, var(--np-orange-500) 0%, var(--np-gold-500) 100%);
-  --gradient-blue:     linear-gradient(90deg, var(--np-baby-blue-dark) 0%, var(--np-baby-blue) 100%);
+  --color-bg:           #FFFAF3;
+  --color-bg-grad:      linear-gradient(180deg, #F1E6FE 0%, #FFFAF3 60%);
+  --color-surface:      #FFFFFF;
+  --color-surface-soft: #F6EEFF;
+  --color-primary:      #6B3FBE;
+  --color-primary-dark: #3F2680;
+  --color-primary-light:#F1E6FE;
+  --color-accent:       #F5A623;
+  --color-accent-dark:  #D88716;
+  --color-secondary:    #28B3D6;
+  --color-secondary-dark:#1E8FAD;
+  --color-strawberry:   #E58FCC;
+  --color-text:         #2A2342;
+  --color-text-muted:   #6B6383;
+  --color-success:      #4FD568;
+  --color-danger:       #E63946;
+  --color-slate-100:    #F2F2F2;
+  --color-slate-400:    #BABABA;
+  --color-slate-700:    #6B6B6B;
+  --shadow-card:        0 6px 18px rgba(63, 38, 128, 0.10);
+  --shadow-pop:         0 12px 32px rgba(63, 38, 128, 0.18);
+  --radius-pill:        28px;
+  --radius-card:        16px;
+  --radius-inset:       12px;
+  --font-display:       "Fredoka", "SF Pro Rounded", system-ui, sans-serif;
+  --font-body:          "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
   font-family: var(--font-body);
-  color: var(--np-slate-800);
-  background: var(--np-white);
+  color: var(--color-text);
+  background: var(--color-bg);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
+  background-image: var(--color-bg-grad);
+  background-attachment: fixed;
 }
+
 img { max-width: 100%; display: block; }
-a { color: var(--np-grape-500); text-decoration: none; }
-button { font-family: inherit; cursor: pointer; border: none; background: none; }
-input, select { font-family: inherit; font-size: 15px; }
+button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, textarea, select { font: inherit; color: inherit; }
+a { color: var(--color-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
-.skip-link {
-  position: absolute; top: -40px; left: 8px;
-  background: var(--np-grape-800); color: var(--np-white);
-  padding: 8px 14px; border-radius: 8px;
-  z-index: 10000; transition: top 0.15s;
-}
-.skip-link:focus { top: 8px; }
+h1, h2, h3, h4 { font-family: var(--font-display); font-weight: 700; color: var(--color-primary-dark); line-height: 1.15; }
+h1 { font-size: clamp(2rem, 4vw, 3.25rem); }
+h2 { font-size: 1.6rem; }
+h3 { font-size: 1.2rem; }
 
-/* ============================================================
-   HEADER + NAV
-   ============================================================ */
-.np-header {
-  background: linear-gradient(180deg, var(--np-baby-blue) 0%, var(--np-baby-blue-dark) 100%);
-  border-bottom: 4px solid var(--np-grape-500);
-  position: sticky; top: 0; z-index: 100;
-  box-shadow: 0 2px 12px rgba(54, 40, 125, 0.18);
-}
-.np-header__inner {
-  max-width: 1180px; margin: 0 auto;
-  display: flex; align-items: center; gap: 18px;
-  padding: 12px 20px;
-}
-.np-logo {
-  display: flex; align-items: center; gap: 10px;
-  text-decoration: none;
-  flex-shrink: 0;
-}
-.np-logo img { height: 44px; width: auto; }
-.np-logo__wordmark {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 22px;
-  color: var(--np-white);
-  letter-spacing: -0.5px;
-  text-shadow: 0 2px 0 rgba(54, 40, 125, 0.35);
-  display: none;
-}
-@media (min-width: 720px) { .np-logo__wordmark { display: inline; } }
-
+/* ============= Top nav ============= */
 .np-nav {
-  display: flex; gap: 4px;
-  flex: 1;
-  align-items: center;
+  position: sticky; top: 0; z-index: 50;
+  background: var(--color-surface);
+  box-shadow: 0 2px 8px rgba(63, 38, 128, 0.06);
 }
+.np-nav__inner {
+  max-width: 1200px; margin: 0 auto;
+  padding: 14px 24px;
+  display: flex; align-items: center; gap: 24px;
+}
+.np-brand {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-display); font-weight: 700;
+  color: var(--color-primary); font-size: 1.4rem;
+}
+.np-brand__mark {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--color-primary); color: var(--color-accent);
+  display: grid; place-items: center; font-size: 1.1rem; font-weight: 700;
+}
+.np-nav__items { display: flex; gap: 8px; flex: 1; }
 .np-nav__item {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 15px;
-  padding: 10px 16px;
-  border-radius: var(--np-radius-pill);
-  color: var(--np-white);
-  background: transparent;
-  cursor: pointer;
-  transition: background 0.15s, transform 0.15s;
-  white-space: nowrap;
+  padding: 8px 14px; border-radius: var(--radius-pill);
+  color: var(--color-text-muted); font-weight: 600;
 }
-.np-nav__item:hover { background: rgba(255, 255, 255, 0.18); }
-.np-nav__item.is-active {
-  background: var(--np-white);
-  color: var(--np-grape-500);
-  box-shadow: 0 4px 0 rgba(54, 40, 125, 0.15);
-}
+.np-nav__item.is-active { color: var(--color-primary); background: var(--color-primary-light); }
+.np-nav__item:hover { color: var(--color-primary); }
 
-.np-header__cta { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.np-nav__cta { display: flex; gap: 10px; align-items: center; }
 
 .np-pill {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14px;
-  padding: 10px 20px;
-  border-radius: var(--np-radius-pill);
   display: inline-flex; align-items: center; gap: 8px;
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.15s, background 0.15s;
+  padding: 10px 18px; border-radius: var(--radius-pill);
+  font-weight: 700; font-size: 0.95rem;
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
 }
-.np-pill--orange {
-  background: var(--np-orange-500); color: var(--np-white);
-  box-shadow: 0 4px 0 #C45F00;
-}
-.np-pill--orange:hover { transform: translateY(-1px); box-shadow: 0 5px 0 #C45F00; }
-.np-pill--orange:active { transform: translateY(2px); box-shadow: 0 2px 0 #C45F00; }
-.np-pill--grape {
-  background: var(--np-grape-500); color: var(--np-white);
-  box-shadow: 0 4px 0 var(--np-grape-800);
-}
-.np-pill--grape:hover { transform: translateY(-1px); box-shadow: 0 5px 0 var(--np-grape-800); }
-.np-pill--grape:active { transform: translateY(2px); box-shadow: 0 2px 0 var(--np-grape-800); }
-.np-pill--gold {
-  background: var(--np-gold-500); color: var(--np-grape-800);
-  box-shadow: 0 4px 0 #C29A00;
-}
-.np-pill--dark {
-  background: var(--np-slate-800); color: var(--np-white);
-  box-shadow: 0 4px 0 #1E1E1E;
-}
-.np-pill--ghost {
-  background: rgba(255, 255, 255, 0.92); color: var(--np-grape-500);
-  box-shadow: 0 4px 0 rgba(54, 40, 125, 0.25);
-}
-.np-pill--ghost:hover { background: var(--np-white); }
-.np-pill--block { width: 100%; justify-content: center; padding: 14px 20px; font-size: 16px; }
-.np-pill[disabled] { opacity: 0.55; cursor: not-allowed; transform: none !important; }
+.np-pill:hover:not(:disabled) { transform: translateY(-1px); }
+.np-pill:disabled { opacity: 0.5; cursor: not-allowed; }
+.np-pill--grape  { background: var(--color-primary);   color: #fff; box-shadow: var(--shadow-card); }
+.np-pill--grape:hover:not(:disabled) { background: var(--color-primary-dark); }
+.np-pill--orange { background: var(--color-accent);    color: var(--color-text); }
+.np-pill--orange:hover:not(:disabled) { background: var(--color-accent-dark); }
+.np-pill--blue   { background: var(--color-secondary); color: #fff; }
+.np-pill--ghost  { background: transparent; color: var(--color-primary); border: 2px solid var(--color-primary); }
+.np-pill--ghost:hover:not(:disabled) { background: var(--color-primary); color: #fff; }
+.np-pill--small  { padding: 6px 12px; font-size: 0.85rem; }
 
+/* ============= Account chip (logged-in nav) ============= */
 .np-account-chip {
-  display: inline-flex; align-items: center; gap: 8px;
-  background: rgba(255, 255, 255, 0.92);
-  border-radius: var(--np-radius-pill);
-  padding: 6px 14px 6px 6px;
-  font-family: var(--font-display);
-  font-weight: 600;
-  color: var(--np-grape-500);
-  cursor: pointer;
-  box-shadow: 0 4px 0 rgba(54, 40, 125, 0.25);
-  transition: transform 0.1s;
+  display: none; align-items: center; gap: 10px;
+  padding: 6px 14px 6px 6px; border-radius: var(--radius-pill);
+  background: var(--color-primary-light); cursor: pointer;
+  font-weight: 600; color: var(--color-primary-dark);
 }
-.np-account-chip:hover { transform: translateY(-1px); }
 .np-account-chip__avatar {
-  width: 28px; height: 28px; border-radius: 50%;
-  background: var(--gradient-purple);
-  color: var(--np-white);
-  font-size: 13px; font-weight: 700;
-  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--color-primary); color: var(--color-accent);
+  display: grid; place-items: center; font-weight: 700;
 }
+body.is-authed .np-account-chip { display: inline-flex; }
+body.is-authed #btn-open-auth   { display: none; }
 
-/* When logged in we hide the auth pill; when logged out we hide the chip. */
-body.is-authed .np-when-anon { display: none !important; }
-body:not(.is-authed) .np-when-authed { display: none !important; }
+/* ============= Screens ============= */
+.np-screen { display: none; padding: 32px 0 80px; }
+.np-screen.is-active { display: block; }
+.np-container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
 
-/* ============================================================
-   IDENTITY-STITCH BANNER (shown briefly after login)
-   ============================================================ */
-.np-stitch-banner {
-  background: var(--gradient-purple);
-  color: var(--np-white);
-  padding: 14px 20px;
-  text-align: center;
-  font-weight: 600;
-  font-size: 14px;
-  display: none;
-  animation: np-slide-down 0.35s ease-out;
-}
-.np-stitch-banner.is-visible { display: block; }
-.np-stitch-banner strong { font-family: var(--font-display); font-weight: 700; }
-@keyframes np-slide-down {
-  from { transform: translateY(-100%); }
-  to   { transform: translateY(0); }
-}
-
-/* ============================================================
-   MAIN LAYOUT
-   ============================================================ */
-.np-main {
-  flex: 1;
-  max-width: 1180px;
-  width: 100%;
-  margin: 0 auto;
-  padding: 24px 20px 60px;
-}
-.np-screen { display: none; }
-.np-screen.is-active { display: block; animation: np-fade-in 0.25s ease-out; }
-@keyframes np-fade-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-/* ============================================================
-   HOME — hero + featured pet + quick links
-   ============================================================ */
+/* ============= Hero (Home) ============= */
 .np-hero {
-  position: relative;
-  border-radius: var(--np-radius-card);
-  overflow: hidden;
-  min-height: 280px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--gradient-purple);
-  box-shadow: var(--np-shadow-card);
+  background: linear-gradient(120deg, var(--color-primary) 0%, var(--color-strawberry) 60%, var(--color-accent) 100%);
+  color: #fff; border-radius: var(--radius-card);
+  padding: 48px 40px; margin-bottom: 32px;
+  box-shadow: var(--shadow-pop);
+  position: relative; overflow: hidden;
 }
-.np-hero__img {
-  position: absolute; inset: 0;
-  width: 100%; height: 100%; object-fit: cover;
-  filter: brightness(0.82);
+.np-hero h1 { color: #fff; }
+.np-hero__eyebrow {
+  display: inline-block; padding: 4px 12px; border-radius: var(--radius-pill);
+  background: rgba(255,255,255,0.2); font-weight: 600; font-size: 0.85rem;
+  letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 14px;
 }
-.np-hero__inner {
-  position: relative;
-  text-align: center;
-  padding: 32px 24px;
-  color: var(--np-white);
-}
-.np-hero__brand {
-  height: 52px;
-  margin: 0 auto 12px;
-  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.4));
-}
-.np-hero__title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 34px;
-  letter-spacing: -0.5px;
-  text-shadow: 0 3px 0 rgba(54, 40, 125, 0.55), 0 4px 8px rgba(0, 0, 0, 0.3);
-  margin-bottom: 6px;
-}
-.np-hero__sub {
-  font-size: 15px;
-  font-weight: 500;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
-  margin-bottom: 18px;
-  max-width: 480px;
-  margin-left: auto;
-  margin-right: auto;
-}
-.np-hero__cta-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.np-hero__sub { font-size: 1.1rem; max-width: 640px; margin: 12px 0 24px; opacity: 0.95; }
+.np-hero__cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.np-hero__cta .np-pill--grape  { background: #fff; color: var(--color-primary); }
+.np-hero__cta .np-pill--grape:hover:not(:disabled) { background: var(--color-primary-light); }
+.np-hero__cta .np-pill--orange { background: var(--color-accent); color: var(--color-text); }
 
-.np-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-  margin-top: 20px;
+/* ============= Stat cards ============= */
+.np-stats {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;
 }
-@media (min-width: 880px) {
-  .np-grid--two { grid-template-columns: 1.2fr 1fr; align-items: start; }
+.np-stat {
+  background: var(--color-surface); border-radius: var(--radius-card);
+  padding: 20px; box-shadow: var(--shadow-card);
 }
+.np-stat__label { font-size: 0.85rem; color: var(--color-text-muted); font-weight: 600; }
+.np-stat__value { font-family: var(--font-display); font-size: 1.8rem; color: var(--color-primary); margin-top: 6px; }
+.np-stat__sub   { font-size: 0.9rem; color: var(--color-text-muted); margin-top: 4px; }
 
-.np-card {
-  background: var(--np-white);
-  border-radius: var(--np-radius-card);
-  padding: 20px;
-  box-shadow: var(--np-shadow-card);
-  border: 1px solid var(--np-slate-100);
-}
-.np-card--star {
-  border: 2px dashed var(--np-gold-500);
-  background:
-    radial-gradient(circle at 8px 8px, var(--np-gold-500) 1.5px, transparent 2px) 0 0 / 24px 24px,
-    var(--np-white);
-  background-blend-mode: normal;
-}
-.np-card__title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 19px;
-  color: var(--np-grape-500);
-  margin-bottom: 12px;
-  display: flex; align-items: center; gap: 8px;
-}
+@media (max-width: 720px) { .np-stats { grid-template-columns: 1fr; } }
 
-/* Featured pet */
-.np-pet {
-  display: flex; gap: 16px; align-items: flex-start;
-}
-.np-pet__avatar {
-  width: 96px; height: 96px;
-  border-radius: var(--np-radius-inset);
-  background: var(--np-strawberry-100);
-  flex-shrink: 0;
-  overflow: hidden;
-}
-.np-pet__avatar img { width: 100%; height: 100%; object-fit: contain; }
-.np-pet__stats { flex: 1; }
-.np-pet__stat-row {
-  display: flex; gap: 10px; align-items: center;
-  font-size: 13px; padding: 3px 0;
-}
-.np-pet__stat-label {
-  color: var(--np-strawberry-500);
-  font-weight: 700;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  width: 64px;
-}
-.np-pet__stat-value { color: var(--np-slate-800); font-weight: 600; }
+/* ============= Section blocks ============= */
+.np-section { background: var(--color-surface); border-radius: var(--radius-card); padding: 28px; margin-bottom: 24px; box-shadow: var(--shadow-card); }
+.np-section__head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; gap: 16px; flex-wrap: wrap; }
+.np-section__head h2 { color: var(--color-primary-dark); }
+.np-section__sub { color: var(--color-text-muted); margin-top: 4px; }
 
-/* Quick links */
-.np-quick {
-  display: flex; align-items: center; gap: 14px;
-  padding: 14px;
-  background: var(--np-white);
-  border-radius: var(--np-radius-card);
-  box-shadow: var(--np-shadow-card);
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.15s;
-  margin-bottom: 10px;
-  width: 100%;
-  text-align: left;
-}
-.np-quick:hover { transform: translateY(-2px); box-shadow: var(--np-shadow-pop); }
-.np-quick__icon {
-  width: 48px; height: 48px;
-  border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 22px;
-  flex-shrink: 0;
-}
-.np-quick__icon--orange { background: rgba(255, 122, 0, 0.15); color: var(--np-orange-500); }
-.np-quick__icon--grape  { background: rgba(142, 50, 236, 0.15); color: var(--np-grape-500); }
-.np-quick__icon--lime   { background: rgba(77, 218, 82, 0.18); color: #2EA834; }
-.np-quick__title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 16px;
-  color: var(--np-slate-800);
-}
-.np-quick__sub {
-  font-size: 13px;
-  color: var(--np-slate-700);
-  margin-top: 2px;
-}
-.np-quick__chev { color: var(--np-slate-400); font-size: 18px; margin-left: auto; }
-
-/* Currency pills */
-.np-currency-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-.np-currency {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 8px 14px;
-  border-radius: var(--np-radius-pill);
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 14px;
-  color: var(--np-grape-800);
-}
-.np-currency--np {
-  background: var(--np-gold-500);
-  box-shadow: 0 3px 0 #C29A00;
-}
-.np-currency--nc {
-  background: var(--np-lime-300);
-  box-shadow: 0 3px 0 #2EA834;
-  color: var(--np-white);
-}
-.np-currency__icon { font-size: 16px; }
-
-/* ============================================================
-   DAILY screen
-   ============================================================ */
-.np-daily-bg {
-  background-image: url("https://images.neopets.com/themes/h5/common/signup/images/bg-star.png");
-  background-color: var(--np-grape-100);
-  background-size: 80px;
-  border-radius: var(--np-radius-card);
-  padding: 28px 20px;
-  box-shadow: var(--np-shadow-card);
-}
-.np-daily__title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  color: var(--np-grape-800);
-  font-size: 26px;
-  text-align: center;
-  margin-bottom: 6px;
-}
-.np-daily__sub {
-  text-align: center;
-  color: var(--np-slate-700);
-  margin-bottom: 22px;
-}
-.np-streak {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 8px;
-  max-width: 640px;
-  margin: 0 auto 24px;
-}
+/* ============= Daily streak ============= */
+.np-streak__grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin: 16px 0 20px; }
+@media (max-width: 720px) { .np-streak__grid { grid-template-columns: repeat(4, 1fr); } }
 .np-streak__cell {
-  background: var(--np-white);
-  border-radius: var(--np-radius-inset);
-  padding: 14px 4px;
-  text-align: center;
-  border: 2px solid var(--np-slate-100);
+  background: var(--color-surface-soft); border-radius: var(--radius-inset);
+  padding: 14px 8px; text-align: center; position: relative;
+  border: 2px solid transparent;
+}
+.np-streak__cell.is-claimed { background: var(--color-primary-light); border-color: var(--color-primary); }
+.np-streak__cell.is-today   { background: rgba(245, 166, 35, 0.18); border-color: var(--color-accent); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(245, 166, 35, 0.4); } 50% { box-shadow: 0 0 0 8px rgba(245, 166, 35, 0); } }
+.np-streak__day    { font-size: 0.75rem; color: var(--color-text-muted); font-weight: 600; }
+.np-streak__reward { font-family: var(--font-display); font-weight: 700; color: var(--color-primary-dark); margin-top: 2px; font-size: 0.95rem; }
+.np-streak__check  { position: absolute; top: 4px; right: 4px; color: var(--color-success); font-weight: 700; }
+
+/* ============= Rewards grid ============= */
+.np-rewards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+@media (max-width: 720px) { .np-rewards { grid-template-columns: 1fr; } }
+.np-reward { background: var(--color-surface-soft); border-radius: var(--radius-card); padding: 20px; }
+.np-reward.is-locked { opacity: 0.7; }
+.np-reward__top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.np-reward__icon { width: 48px; height: 48px; border-radius: 12px; background: var(--color-primary); color: var(--color-accent); font-size: 1.6rem; display: grid; place-items: center; }
+.np-reward__tier { font-size: 0.75rem; color: var(--color-text-muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em; }
+.np-reward__name { font-family: var(--font-display); font-weight: 700; color: var(--color-primary-dark); }
+.np-reward__desc { color: var(--color-text-muted); font-size: 0.9rem; min-height: 38px; margin-bottom: 12px; }
+.np-reward__cost { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.np-reward__price { color: var(--color-accent-dark); font-weight: 700; }
+
+/* ============= Game cards ============= */
+.np-games { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+@media (max-width: 1024px) { .np-games { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 540px)  { .np-games { grid-template-columns: 1fr; } }
+.np-game { background: var(--color-surface); border-radius: var(--radius-card); overflow: hidden; box-shadow: var(--shadow-card); transition: transform .15s ease; }
+.np-game:hover { transform: translateY(-4px); box-shadow: var(--shadow-pop); }
+.np-game__thumb { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+.np-game__meta { padding: 14px; }
+.np-game__genre { font-size: 0.75rem; color: var(--color-secondary); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.np-game__name  { font-family: var(--font-display); font-weight: 700; color: var(--color-primary-dark); margin: 2px 0 6px; }
+.np-game__row   { display: flex; justify-content: space-between; align-items: center; }
+.np-game__players { font-size: 0.85rem; color: var(--color-text-muted); }
+
+/* ============= Game / Play screen ============= */
+.np-play__hero {
+  background-size: cover; background-position: center;
+  border-radius: var(--radius-card); height: 320px;
+  position: relative; overflow: hidden; box-shadow: var(--shadow-card);
+}
+.np-play__hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,0) 30%, rgba(63,38,128,0.7) 100%); }
+.np-play__hero-text { position: absolute; bottom: 24px; left: 28px; right: 28px; color: #fff; z-index: 1; }
+.np-play__hero-text h1 { color: #fff; }
+.np-play__hero-text .np-hero__eyebrow { background: rgba(255,255,255,0.25); }
+.np-play__panel { background: var(--color-surface); border-radius: var(--radius-card); padding: 28px; margin-top: 20px; box-shadow: var(--shadow-card); display: grid; gap: 16px; }
+.np-play__progress {
+  height: 24px; background: var(--color-surface-soft); border-radius: 999px; overflow: hidden;
   position: relative;
-  transition: border-color 0.2s, transform 0.1s;
 }
-.np-streak__cell.is-claimed {
-  background: var(--np-gold-500);
-  border-color: #C29A00;
-  color: var(--np-grape-800);
+.np-play__progress-bar {
+  height: 100%; width: 0%; background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-accent) 100%);
+  transition: width 0.4s ease;
 }
-.np-streak__cell.is-today {
-  border-color: var(--np-orange-500);
-  box-shadow: 0 0 0 3px rgba(255, 122, 0, 0.25);
-  animation: np-pulse 2s ease-in-out infinite;
-}
-@keyframes np-pulse {
-  0%, 100% { transform: translateY(0); }
-  50%      { transform: translateY(-3px); }
-}
-.np-streak__day {
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--np-slate-400);
-  letter-spacing: 0.5px;
-}
-.np-streak__cell.is-claimed .np-streak__day { color: var(--np-grape-800); }
-.np-streak__reward {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 15px;
-  color: var(--np-grape-500);
-  margin-top: 2px;
-}
-.np-streak__cell.is-claimed .np-streak__reward { color: var(--np-grape-800); }
-.np-streak__check {
-  position: absolute;
-  top: 4px; right: 4px;
-  font-size: 14px;
-  color: var(--np-grape-800);
-}
+.np-play__row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.np-play__score { font-family: var(--font-display); font-size: 1.4rem; color: var(--color-primary); }
+.np-play__status { color: var(--color-text-muted); font-size: 0.95rem; }
 
-.np-daily__claim {
-  display: block;
-  max-width: 320px;
-  margin: 0 auto;
-}
-.np-daily__faerie {
-  width: 180px;
-  margin: 8px auto 16px;
-  display: block;
-}
+/* ============= Footer ============= */
+.np-footer { text-align: center; color: var(--color-text-muted); padding: 24px; font-size: 0.85rem; }
 
-/* ============================================================
-   REWARDS screen
-   ============================================================ */
-.np-rewards-header {
-  background: var(--gradient-orange);
-  border-radius: var(--np-radius-card);
-  padding: 28px 24px;
-  color: var(--np-white);
-  margin-bottom: 18px;
-  box-shadow: var(--np-shadow-card);
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  flex-wrap: wrap;
-}
-.np-rewards-header__title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 26px;
-  text-shadow: 0 2px 0 rgba(196, 95, 0, 0.55);
-  margin-bottom: 4px;
-}
-.np-rewards-header__sub {
-  font-size: 14px;
-  opacity: 0.95;
-}
-.np-tier-badge {
-  background: var(--np-white);
-  color: var(--np-grape-500);
-  padding: 6px 14px;
-  border-radius: var(--np-radius-pill);
-  font-family: var(--font-display);
-  font-weight: 700;
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  margin-top: 8px;
-}
-
-.np-rewards-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
-}
-@media (min-width: 720px) {
-  .np-rewards-grid { grid-template-columns: 1fr 1fr; }
-}
-
-.np-reward {
-  background: var(--np-white);
-  border-radius: var(--np-radius-card);
-  padding: 18px;
-  border: 1px solid var(--np-slate-100);
-  box-shadow: var(--np-shadow-card);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.np-reward__top {
-  display: flex; align-items: center; gap: 14px;
-}
-.np-reward__icon {
-  width: 56px; height: 56px;
-  border-radius: 50%;
-  background: var(--gradient-purple);
-  color: var(--np-white);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 26px;
-  flex-shrink: 0;
-}
-.np-reward__name {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 17px;
-  color: var(--np-slate-800);
-}
-.np-reward__tier {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--np-grape-500);
-  letter-spacing: 0.4px;
-}
-.np-reward__desc { font-size: 13px; color: var(--np-slate-700); }
-.np-reward__cost {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-top: 4px;
-}
-.np-reward__price {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 16px;
-  color: var(--np-orange-500);
-  display: inline-flex; align-items: center; gap: 4px;
-}
-.np-reward.is-locked { opacity: 0.62; }
-.np-reward.is-locked .np-pill { pointer-events: none; }
-
-/* ============================================================
-   MODAL (auth + account)
-   ============================================================ */
+/* ============= Modals ============= */
 .np-modal-backdrop {
-  position: fixed; inset: 0;
-  background: rgba(54, 40, 125, 0.55);
-  display: flex; align-items: center; justify-content: center;
-  padding: 20px;
-  z-index: 1000;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.2s;
-  overflow-y: auto;
+  position: fixed; inset: 0; background: rgba(63, 38, 128, 0.5); backdrop-filter: blur(6px);
+  display: none; align-items: center; justify-content: center; z-index: 100; padding: 20px;
 }
-.np-modal-backdrop.is-open {
-  opacity: 1;
-  pointer-events: auto;
-}
-.np-modal {
-  background: var(--np-white);
-  border-radius: var(--np-radius-card);
-  width: 100%;
-  max-width: 460px;
-  padding: 28px 24px;
-  box-shadow: var(--np-shadow-pop);
-  position: relative;
-  max-height: 92vh;
-  overflow-y: auto;
-  transform: translateY(20px);
-  transition: transform 0.2s;
-}
-.np-modal-backdrop.is-open .np-modal { transform: translateY(0); }
-.np-modal__close {
-  position: absolute; top: 12px; right: 14px;
-  width: 32px; height: 32px;
-  border-radius: 50%;
-  background: var(--np-slate-100);
-  color: var(--np-slate-800);
-  font-size: 18px;
-  display: flex; align-items: center; justify-content: center;
-}
-.np-modal__close:hover { background: var(--np-slate-400); color: var(--np-white); }
+.np-modal-backdrop.is-open { display: flex; }
+.np-modal { background: var(--color-surface); border-radius: var(--radius-card); width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; box-shadow: var(--shadow-pop); }
+.np-modal__head { display: flex; justify-content: space-between; align-items: center; padding: 24px 24px 0; }
+.np-modal__close { font-size: 1.4rem; color: var(--color-text-muted); padding: 4px 10px; border-radius: 8px; }
+.np-modal__close:hover { background: var(--color-slate-100); color: var(--color-primary); }
+.np-modal__body { padding: 16px 24px 24px; }
 
-.np-modal__brand {
-  display: flex; justify-content: center; margin-bottom: 14px;
+/* ============= Forms ============= */
+.np-field { margin-bottom: 16px; }
+.np-field__label { display: block; font-weight: 600; color: var(--color-text); margin-bottom: 6px; font-size: 0.9rem; }
+.np-field__input {
+  width: 100%; padding: 12px 14px; border-radius: var(--radius-inset);
+  border: 2px solid var(--color-slate-100); background: var(--color-surface);
+  font-size: 1rem; transition: border-color 0.15s;
 }
-.np-modal__brand img { height: 44px; }
-.np-modal__title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  color: var(--np-grape-800);
-  font-size: 24px;
-  text-align: center;
-  margin-bottom: 4px;
-}
-.np-modal__sub {
-  text-align: center;
-  color: var(--np-slate-700);
-  font-size: 14px;
-  margin-bottom: 20px;
-  padding: 0 8px;
+.np-field__input:focus { outline: none; border-color: var(--color-primary); }
+.np-field__hint { font-size: 0.8rem; color: var(--color-text-muted); margin-top: 4px; }
+.np-field__hint code { background: var(--color-slate-100); padding: 1px 6px; border-radius: 4px; font-size: 0.8em; }
+
+.np-error { background: rgba(230, 57, 70, 0.1); color: var(--color-danger); padding: 10px 14px; border-radius: var(--radius-inset); font-size: 0.9rem; margin-bottom: 12px; display: none; }
+.np-error.is-visible { display: block; }
+
+.np-modal__footer { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
+
+.np-link {
+  background: none; color: var(--color-primary); text-decoration: underline;
+  cursor: pointer; padding: 4px 0;
 }
 
-.np-stitch-callout {
-  background: var(--np-cream-card);
-  border: 1px dashed var(--np-gold-500);
-  border-radius: var(--np-radius-inset);
-  padding: 12px 14px;
-  margin-bottom: 18px;
-  font-size: 13px;
-  color: var(--np-grape-800);
-}
-.np-stitch-callout strong { font-family: var(--font-display); }
-
-.np-field { margin-bottom: 14px; }
-.np-field__label {
-  display: block;
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--np-grape-800);
-  margin-bottom: 6px;
-}
-.np-field__hint {
-  font-size: 12px;
-  color: var(--np-slate-700);
-  margin-top: 4px;
-}
-.np-field__optional {
-  font-size: 11px;
-  color: var(--np-slate-400);
-  font-weight: 500;
-  margin-left: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
-.np-input {
-  width: 100%;
-  padding: 12px 14px;
-  border: 2px solid var(--np-slate-100);
-  border-radius: var(--np-radius-inset);
-  font-size: 15px;
-  background: var(--np-white);
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-.np-input:focus {
-  outline: none;
-  border-color: var(--np-grape-500);
-  box-shadow: 0 0 0 3px rgba(142, 50, 236, 0.18);
-}
-.np-input--lead {
-  border-color: var(--np-orange-500);
-  background: #FFFBF6;
-}
-
-.np-form-error {
-  background: rgba(230, 57, 70, 0.10);
-  color: var(--np-error);
-  border: 1px solid rgba(230, 57, 70, 0.4);
-  padding: 10px 12px;
-  border-radius: var(--np-radius-inset);
-  font-size: 13px;
-  margin-bottom: 12px;
-  display: none;
-}
-.np-form-error.is-visible { display: block; }
-
-.np-modal__footer {
-  margin-top: 14px;
-  text-align: center;
-  font-size: 13px;
-  color: var(--np-slate-700);
-}
-.np-modal__footer button {
-  color: var(--np-grape-500);
-  font-weight: 700;
-  text-decoration: underline;
-}
-
-/* Account view rows */
-.np-account-section {
-  border-top: 1px solid var(--np-slate-100);
-  padding-top: 14px;
-  margin-top: 14px;
-}
-.np-account-section:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
-.np-readonly-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 8px 0;
-  font-size: 13px;
-}
-.np-readonly-row__label {
-  color: var(--np-slate-700);
-  font-weight: 600;
-}
-.np-readonly-row__value {
-  font-family: ui-monospace, "SF Mono", "Roboto Mono", monospace;
-  color: var(--np-slate-800);
-  font-weight: 700;
-}
-
-.np-tag-row { display: flex; gap: 8px; }
-.np-tag-row .np-input { flex: 1; }
-.np-tag-list {
-  display: flex; flex-wrap: wrap; gap: 6px;
-  margin-top: 8px;
-  min-height: 24px;
-}
+/* ============= Tag history chips ============= */
+.np-tag-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .np-tag-chip {
-  background: var(--np-grape-100);
-  color: var(--np-grape-800);
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: var(--np-radius-pill);
-  font-weight: 600;
+  background: var(--color-primary-light); color: var(--color-primary-dark);
+  padding: 4px 12px; border-radius: var(--radius-pill); font-size: 0.85rem; font-weight: 600;
 }
 
-/* Toast */
+/* ============= Toast ============= */
 .np-toast {
-  position: fixed;
-  bottom: 24px; left: 50%;
-  transform: translateX(-50%) translateY(120%);
-  background: var(--np-grape-800);
-  color: var(--np-white);
-  padding: 12px 20px;
-  border-radius: var(--np-radius-pill);
-  font-weight: 600;
-  font-size: 14px;
-  box-shadow: var(--np-shadow-pop);
-  transition: transform 0.3s ease-out;
-  z-index: 2000;
-  max-width: 90vw;
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: var(--color-text); color: #fff;
+  padding: 12px 20px; border-radius: var(--radius-pill);
+  font-weight: 600; font-size: 0.95rem; opacity: 0; transition: all 0.25s ease;
+  pointer-events: none; max-width: 90vw; box-shadow: var(--shadow-pop);
+  z-index: 200;
 }
-.np-toast.is-visible { transform: translateX(-50%) translateY(0); }
+.np-toast.is-visible { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 
-/* Responsive */
-@media (max-width: 720px) {
-  .np-header__inner { flex-wrap: wrap; gap: 10px; }
-  .np-nav { order: 3; flex-basis: 100%; justify-content: center; }
-  .np-header__cta { margin-left: auto; }
-  .np-hero__title { font-size: 26px; }
-  .np-streak { grid-template-columns: repeat(7, 1fr); gap: 4px; }
-  .np-streak__reward { font-size: 13px; }
-  .np-pet { flex-direction: column; align-items: center; text-align: center; }
+/* ============= Stitch banner ============= */
+.np-stitch {
+  background: linear-gradient(135deg, var(--color-success), var(--color-secondary));
+  color: #fff; padding: 14px 20px; border-radius: var(--radius-card);
+  margin-bottom: 16px; font-weight: 600; display: none;
+  box-shadow: var(--shadow-card);
 }
+.np-stitch.is-visible { display: block; animation: slideDown 0.35s ease; }
+@keyframes slideDown { from { transform: translateY(-12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
-footer.np-foot {
-  background: var(--np-grape-800);
-  color: rgba(255, 255, 255, 0.85);
-  text-align: center;
-  font-size: 12px;
-  padding: 18px 20px;
-  margin-top: auto;
+/* ============= Account view ============= */
+.np-account-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
+.np-account-meta {
+  background: var(--color-primary); color: #fff; border-radius: var(--radius-card);
+  padding: 24px; display: grid; gap: 12px;
 }
-footer.np-foot strong { color: var(--np-gold-500); }
+.np-account-meta__row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.np-account-meta__label { font-size: 0.85rem; opacity: 0.85; }
+.np-account-meta__value { font-family: var(--font-display); font-size: 1rem; font-weight: 700; word-break: break-all; }
+.np-account-form { background: var(--color-surface-soft); padding: 20px; border-radius: var(--radius-card); }
+.np-account-form__title { font-family: var(--font-display); color: var(--color-primary-dark); font-weight: 700; margin-bottom: 12px; }
+.np-account-form__row { display: flex; gap: 10px; align-items: flex-end; }
+.np-account-form__row .np-field { flex: 1; margin-bottom: 0; }
+
+/* ============= Theme indicator (debug aid) ============= */
+.np-theme-tag {
+  position: fixed; bottom: 12px; right: 12px;
+  background: rgba(0,0,0,0.6); color: #fff;
+  font-size: 0.75rem; font-family: var(--font-body);
+  padding: 4px 10px; border-radius: var(--radius-pill);
+  pointer-events: none; z-index: 60;
+}
 </style>
 </head>
 <body>
 
-<a href="#main" class="skip-link">Skip to main content</a>
-
-<!-- ============================================================
-     HEADER
-     ============================================================ -->
-<header class="np-header">
-  <div class="np-header__inner">
-    <button class="np-logo" data-route="home" aria-label="Neopets — go to home">
-      <img src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png"
-           alt="Neopets 25th anniversary logo"
-           width="44" height="44">
-      <span class="np-logo__wordmark">Neopets</span>
-    </button>
-
-    <nav class="np-nav" aria-label="Primary">
-      <button class="np-nav__item is-active" data-route="home">Home</button>
-      <button class="np-nav__item" data-route="daily">Daily</button>
-      <button class="np-nav__item" data-route="rewards">Rewards</button>
+<!-- ============== TOP NAV ============== -->
+<header class="np-nav">
+  <div class="np-nav__inner">
+    <div class="np-brand">
+      <span id="brand-mark" class="np-brand__mark">Q</span>
+      <span id="brand-name">QuestKeep</span>
+    </div>
+    <nav class="np-nav__items">
+      <button class="np-nav__item is-active" data-route="home" id="nav-home-label">Home</button>
+      <button class="np-nav__item"            data-route="game" id="nav-game-label">Quest Trials</button>
+      <button class="np-nav__item"            data-route="rewards" id="nav-rewards-label">Loyalty Vault</button>
     </nav>
-
-    <div class="np-header__cta">
-      <!-- Logged-out only -->
-      <button class="np-pill np-pill--ghost np-when-anon" id="btn-open-auth">
-        <span>Sign In / Register</span>
-      </button>
-      <!-- Logged-in only — replaces the auth pill per the skill's UI state rules -->
-      <button class="np-account-chip np-when-authed" id="btn-open-account" aria-label="Open account">
-        <span class="np-account-chip__avatar" id="account-avatar">N</span>
-        <span id="account-chip-name">My Account</span>
+    <div class="np-nav__cta">
+      <button id="btn-open-auth" class="np-pill np-pill--grape">Sign In / Join</button>
+      <button id="btn-open-account" class="np-account-chip">
+        <span id="account-chip-name">Hi,</span>
+        <span id="account-avatar" class="np-account-chip__avatar">U</span>
       </button>
     </div>
   </div>
 </header>
 
-<!-- Identity-stitch confirmation banner — set visible by JS after login. -->
-<div class="np-stitch-banner" id="stitch-banner" role="status" aria-live="polite">
-  Linked to your Neopia account on this browser. <strong>Your iOS and web activity are now synced.</strong>
-</div>
-
-<!-- ============================================================
-     MAIN
-     ============================================================ -->
-<main class="np-main" id="main">
-
-  <!-- ----- HOME ----- -->
-  <section class="np-screen is-active" data-screen="home" aria-labelledby="hd-home">
-    <h1 id="hd-home" class="sr-only" style="position:absolute;left:-9999px;">Home</h1>
+<!-- ============== HOME SCREEN ============== -->
+<section class="np-screen is-active" data-screen="home">
+  <div class="np-container">
+    <div id="stitch-banner" class="np-stitch">
+      <span id="stitch-banner-text"></span>
+    </div>
 
     <div class="np-hero">
-      <img class="np-hero__img"
-           src="https://images.neopets.com/brandhub/3e7d6dd4/images/product-banners/bg-10.png"
-           alt="Painted illustration of Neopia">
-      <div class="np-hero__inner">
-        <img class="np-hero__brand"
-             src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png"
-             alt="Neopets 25th anniversary logo">
-        <div class="np-hero__title">Neopia in Your Browser</div>
-        <div class="np-hero__sub" id="hero-sub">Sign in to start earning Neopoints, claim daily rewards, and unlock loyalty perks.</div>
-        <div class="np-hero__cta-row">
-          <button class="np-pill np-pill--orange np-when-anon" id="hero-cta-register">
-            Create Account
-          </button>
-          <button class="np-pill np-pill--gold np-when-anon" id="hero-cta-signin">
-            Sign In
-          </button>
-          <button class="np-pill np-pill--gold np-when-authed" data-route="daily">
-            Claim Today's Reward
-          </button>
-          <button class="np-pill np-pill--grape" id="hero-cta-subscribe" hidden>
-            🔔 Get reward alerts
-          </button>
+      <div class="np-hero__eyebrow" id="hero-eyebrow">Welcome</div>
+      <h1 id="hero-title">The realm awaits.</h1>
+      <p id="hero-sub" class="np-hero__sub">Sign in to start earning rewards.</p>
+      <div class="np-hero__cta">
+        <button id="hero-cta-register" class="np-pill np-pill--grape">Join</button>
+        <button id="hero-cta-signin"   class="np-pill np-pill--ghost" style="background:rgba(255,255,255,0.15);color:#fff;border-color:rgba(255,255,255,0.5);">Sign in</button>
+        <button id="hero-cta-subscribe" class="np-pill np-pill--orange" hidden>Get reward alerts</button>
+      </div>
+    </div>
+
+    <div class="np-stats">
+      <div class="np-stat">
+        <div class="np-stat__label" id="streak-label">Daily streak</div>
+        <div class="np-stat__value" id="balance-streak">0</div>
+        <div class="np-stat__sub" id="streak-sub">Sign in to claim daily</div>
+      </div>
+      <div class="np-stat">
+        <div class="np-stat__label" id="tier-label">Loyalty tier</div>
+        <div class="np-stat__value" id="tier-name">Bronze</div>
+        <div class="np-stat__sub" id="tier-sub">Sign in to view tier</div>
+      </div>
+      <div class="np-stat">
+        <div class="np-stat__label" id="balance-label">Coins</div>
+        <div class="np-stat__value" id="balance-np">2,500</div>
+        <div class="np-stat__sub" id="balance-sub">★ across all surfaces</div>
+      </div>
+    </div>
+
+    <div class="np-section">
+      <div class="np-section__head">
+        <div>
+          <h2 id="streak-title">Daily reward</h2>
+          <div class="np-section__sub" id="daily-sub">Sign in to start your streak.</div>
+        </div>
+        <button id="btn-claim-daily" class="np-pill np-pill--orange">Claim today</button>
+      </div>
+      <div id="streak-grid" class="np-streak__grid"></div>
+    </div>
+
+    <div class="np-section">
+      <div class="np-section__head">
+        <div>
+          <h2 id="games-title">Featured games</h2>
+          <div class="np-section__sub" id="games-sub">Play any title to earn coins.</div>
         </div>
       </div>
+      <div id="games-grid" class="np-games"></div>
     </div>
 
-    <div class="np-grid np-grid--two">
-      <div class="np-card np-card--star">
-        <div class="np-card__title">Featured Pet</div>
-        <div class="np-pet">
-          <div class="np-pet__avatar">
-            <img src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/product-banners/img_avatar.png"
-                 alt="Featured Neopets character avatar">
-          </div>
-          <div class="np-pet__stats">
-            <div class="np-pet__stat-row">
-              <span class="np-pet__stat-label">Species</span>
-              <span class="np-pet__stat-value">Faerie Aisha</span>
-            </div>
-            <div class="np-pet__stat-row">
-              <span class="np-pet__stat-label">Colour</span>
-              <span class="np-pet__stat-value">Faerie</span>
-            </div>
-            <div class="np-pet__stat-row">
-              <span class="np-pet__stat-label">Level</span>
-              <span class="np-pet__stat-value" id="pet-level">3</span>
-            </div>
-            <div class="np-pet__stat-row">
-              <span class="np-pet__stat-label">Mood</span>
-              <span class="np-pet__stat-value">Happy</span>
-            </div>
-          </div>
-        </div>
-        <div class="np-currency-row">
-          <span class="np-currency np-currency--np">
-            <span class="np-currency__icon">★</span>
-            <span id="balance-np">2,500</span> NP
-          </span>
-          <span class="np-currency np-currency--nc">
-            <span class="np-currency__icon">◆</span>
-            <span id="balance-nc">150</span> NC
-          </span>
+    <div class="np-section">
+      <div class="np-section__head">
+        <div>
+          <h2 id="rewards-title">Rewards</h2>
+          <div class="np-section__sub" id="rewards-sub">Spend coins on tier-locked rewards.</div>
         </div>
       </div>
-
-      <div>
-        <button class="np-quick" data-route="daily">
-          <span class="np-quick__icon np-quick__icon--orange">📅</span>
-          <span>
-            <span class="np-quick__title">Daily Login Rewards</span>
-            <span class="np-quick__sub" id="streak-sub">Sign in to claim daily</span>
-          </span>
-          <span class="np-quick__chev">›</span>
-        </button>
-
-        <button class="np-quick" data-route="rewards">
-          <span class="np-quick__icon np-quick__icon--grape">✨</span>
-          <span>
-            <span class="np-quick__title">Loyalty Rewards Hub</span>
-            <span class="np-quick__sub" id="tier-sub">Sign in to view tier</span>
-          </span>
-          <span class="np-quick__chev">›</span>
-        </button>
-
-        <button class="np-quick np-when-authed" id="btn-edit-account">
-          <span class="np-quick__icon np-quick__icon--lime">⚙</span>
-          <span>
-            <span class="np-quick__title">Account &amp; Preferences</span>
-            <span class="np-quick__sub">Update email, phone, and personalisation tags</span>
-          </span>
-          <span class="np-quick__chev">›</span>
-        </button>
-      </div>
-    </div>
-  </section>
-
-  <!-- ----- DAILY ----- -->
-  <section class="np-screen" data-screen="daily" aria-labelledby="hd-daily">
-    <h1 id="hd-daily" class="sr-only" style="position:absolute;left:-9999px;">Daily Login Rewards</h1>
-
-    <div class="np-daily-bg">
-      <img class="np-daily__faerie"
-           src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/product-banners/img_faerie.png"
-           alt="Faerie character art from Neopets">
-      <div class="np-daily__title">Daily Login Rewards</div>
-      <div class="np-daily__sub" id="daily-sub">Log in every day to grow your streak and earn more Neopoints.</div>
-
-      <div class="np-streak" id="streak-grid"><!-- populated by JS --></div>
-
-      <div class="np-daily__claim">
-        <button class="np-pill np-pill--orange np-pill--block" id="btn-claim-daily">
-          Claim today's reward
-        </button>
-      </div>
-    </div>
-  </section>
-
-  <!-- ----- REWARDS ----- -->
-  <section class="np-screen" data-screen="rewards" aria-labelledby="hd-rewards">
-    <h1 id="hd-rewards" class="sr-only" style="position:absolute;left:-9999px;">Loyalty Rewards Hub</h1>
-
-    <div class="np-rewards-header">
-      <img src="https://images.neopets.com/brandhub/3e7d6dd4/images/product-banners/Neopia%20quest_logo_Desktop.png"
-           alt="Neopia Quest promotional logo"
-           style="height:84px;width:auto;flex-shrink:0;">
-      <div style="flex:1;min-width:200px;">
-        <div class="np-rewards-header__title">Loyalty Rewards Hub</div>
-        <div class="np-rewards-header__sub">Spend your Neopoints on tier-locked perks. Climb the tiers as you log in daily.</div>
-        <div class="np-tier-badge">
-          <span>★</span>
-          <span id="tier-name">Bronze tier</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="np-rewards-grid" id="rewards-grid"><!-- populated by JS --></div>
-  </section>
-
-</main>
-
-<!-- ============================================================
-     AUTH MODALS
-     ============================================================ -->
-<!-- Choose modal -->
-<div class="np-modal-backdrop" id="modal-auth-choose" data-modal>
-  <div class="np-modal" role="dialog" aria-modal="true" aria-labelledby="auth-choose-title">
-    <button class="np-modal__close" data-close-modal aria-label="Close">×</button>
-    <div class="np-modal__brand">
-      <img src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png"
-           alt="Neopets logo">
-    </div>
-    <div class="np-modal__title" id="auth-choose-title">Welcome to Neopia!</div>
-    <div class="np-modal__sub">Earn Neopoints, claim daily rewards, and unlock loyalty perks across every device.</div>
-
-    <button class="np-pill np-pill--orange np-pill--block" id="btn-show-register" style="margin-bottom:10px;">
-      Create Account
-    </button>
-    <button class="np-pill np-pill--dark np-pill--block" id="btn-show-signin">
-      Sign In
-    </button>
-  </div>
-</div>
-
-<!-- Sign In modal — email-led to drive identity stitching -->
-<div class="np-modal-backdrop" id="modal-signin" data-modal>
-  <div class="np-modal" role="dialog" aria-modal="true" aria-labelledby="signin-title">
-    <button class="np-modal__close" data-close-modal aria-label="Close">×</button>
-    <div class="np-modal__brand">
-      <img src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png"
-           alt="Neopets logo">
-    </div>
-    <div class="np-modal__title" id="signin-title">Sign in to Neopia</div>
-    <div class="np-modal__sub">Use the email from your Neopets app to pick up where you left off.</div>
-
-    <div class="np-stitch-callout">
-      <strong>Cross-device sync</strong> — entering the same email you used in the iOS app links your web session to your Neopia profile. Your daily streak, Neopoints, and loyalty tier follow you here.
-    </div>
-
-    <form id="form-signin" novalidate>
-      <div class="np-form-error" id="signin-error"></div>
-
-      <div class="np-field">
-        <label class="np-field__label" for="signin-email">Email</label>
-        <input type="email" class="np-input np-input--lead" id="signin-email"
-               placeholder="you@example.com"
-               autocomplete="email" required>
-        <div class="np-field__hint">This is the email used to merge your iOS and web profiles.</div>
-      </div>
-
-      <div class="np-field">
-        <label class="np-field__label" for="signin-name">Name</label>
-        <input type="text" class="np-input" id="signin-name"
-               placeholder="Your name"
-               autocomplete="name" required>
-      </div>
-
-      <button type="submit" class="np-pill np-pill--orange np-pill--block">Sign In</button>
-    </form>
-
-    <div class="np-modal__footer">
-      New to Neopia? <button type="button" id="link-to-register">Create an account</button>
+      <div id="rewards-grid" class="np-rewards"></div>
     </div>
   </div>
-</div>
+</section>
 
-<!-- Register modal -->
-<div class="np-modal-backdrop" id="modal-register" data-modal>
-  <div class="np-modal" role="dialog" aria-modal="true" aria-labelledby="register-title">
-    <button class="np-modal__close" data-close-modal aria-label="Close">×</button>
-    <div class="np-modal__brand">
-      <img src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png"
-           alt="Neopets logo">
+<!-- ============== GAME / PLAY SCREEN ============== -->
+<section class="np-screen" data-screen="game">
+  <div class="np-container">
+    <div class="np-play__hero" id="play-hero">
+      <div class="np-play__hero-text">
+        <div class="np-hero__eyebrow" id="play-eyebrow">Level 1</div>
+        <h1 id="play-title">Quest Trials</h1>
+        <p class="np-hero__sub" id="play-sub">Beat the trial to earn rewards.</p>
+      </div>
     </div>
-    <div class="np-modal__title" id="register-title">Create your Neopia account</div>
-    <div class="np-modal__sub">Only your name is required. Add an email if you'd like your iOS and web sessions to stay in sync.</div>
 
-    <form id="form-register" novalidate>
-      <div class="np-form-error" id="register-error"></div>
-
-      <div class="np-field">
-        <label class="np-field__label" for="register-name">Name</label>
-        <input type="text" class="np-input" id="register-name"
-               placeholder="Choose a username"
-               autocomplete="name" required>
+    <div class="np-play__panel">
+      <div class="np-play__row">
+        <div>
+          <div class="np-play__score" id="play-score">Score: 0 / 500</div>
+          <div class="np-play__status" id="play-status">Tap "Start trial" to begin.</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="btn-play-start" class="np-pill np-pill--grape">Start trial</button>
+          <button id="btn-play-complete" class="np-pill np-pill--orange" hidden>Complete trial</button>
+          <button id="btn-play-retry" class="np-pill np-pill--ghost" hidden>Try again</button>
+        </div>
       </div>
-
-      <div class="np-field">
-        <label class="np-field__label" for="register-email">
-          Email <span class="np-field__optional">Optional</span>
-        </label>
-        <input type="email" class="np-input" id="register-email"
-               placeholder="you@example.com"
-               autocomplete="email">
-        <div class="np-field__hint">Use the same email as the iOS app to link your profiles.</div>
+      <div class="np-play__progress">
+        <div id="play-bar" class="np-play__progress-bar"></div>
       </div>
+    </div>
 
-      <div class="np-field">
-        <label class="np-field__label" for="register-phone">
-          Mobile <span class="np-field__optional">Optional</span>
-        </label>
-        <input type="tel" class="np-input" id="register-phone"
-               placeholder="+15551234567"
-               autocomplete="tel">
-        <div class="np-field__hint">E.164 format (e.g. +14155550123).</div>
+    <!-- ====== Quest panel — drives the quest_completed event ====== -->
+    <div class="np-section" style="margin-top:20px;">
+      <div class="np-section__head">
+        <div>
+          <h2 id="quest-title">Faerie Quest</h2>
+          <div class="np-section__sub" id="quest-sub">Sacrifice items to complete the quest.</div>
+        </div>
+        <button id="btn-quest-complete" class="np-pill np-pill--grape" disabled>Complete quest</button>
       </div>
-
-      <button type="submit" class="np-pill np-pill--orange np-pill--block">Create Account</button>
-    </form>
-
-    <div class="np-modal__footer">
-      Already a Neopian? <button type="button" id="link-to-signin">Sign in</button>
+      <div id="quest-items" class="np-tag-chips" style="margin-bottom:12px;"></div>
+      <div class="np-play__progress">
+        <div id="quest-bar" class="np-play__progress-bar"></div>
+      </div>
+      <div id="quest-status" class="np-play__status" style="margin-top:8px;"></div>
     </div>
   </div>
-</div>
+</section>
 
-<!-- ============================================================
-     ACCOUNT MODAL — only reachable while logged in
-     ============================================================ -->
-<div class="np-modal-backdrop" id="modal-account" data-modal>
-  <div class="np-modal" role="dialog" aria-modal="true" aria-labelledby="account-title">
-    <button class="np-modal__close" data-close-modal aria-label="Close">×</button>
-    <div class="np-modal__brand">
-      <img src="https://images.neopets.com/faeriefragments/AcdAGvPV/images/Header_25Logo.png"
-           alt="Neopets logo">
-    </div>
-    <div class="np-modal__title" id="account-title">My Neopia Account</div>
-    <div class="np-modal__sub" id="account-name-sub">Hi there!</div>
-
-    <!-- Read-only profile -->
-    <div class="np-account-section">
-      <div class="np-readonly-row">
-        <span class="np-readonly-row__label">External ID</span>
-        <span class="np-readonly-row__value" id="account-uuid">—</span>
-      </div>
-      <div class="np-readonly-row">
-        <span class="np-readonly-row__label">Loyalty tier</span>
-        <span class="np-readonly-row__value" id="account-tier">Bronze</span>
-      </div>
-      <div class="np-readonly-row">
-        <span class="np-readonly-row__label">Daily streak</span>
-        <span class="np-readonly-row__value"><span id="account-streak">0</span> days</span>
-      </div>
-    </div>
-
-    <!-- Email -->
-    <div class="np-account-section">
-      <form id="form-email">
-        <div class="np-field">
-          <label class="np-field__label" for="account-email">Email</label>
-          <input type="email" class="np-input" id="account-email" placeholder="you@example.com" autocomplete="email">
-          <div class="np-field__hint">Saving calls <code>OneSignal.User.addEmail()</code>.</div>
+<!-- ============== REWARDS SCREEN (re-uses the home rewards grid) ============== -->
+<section class="np-screen" data-screen="rewards">
+  <div class="np-container">
+    <div class="np-section">
+      <div class="np-section__head">
+        <div>
+          <h2 id="rewards-title-2">Rewards</h2>
+          <div class="np-section__sub" id="rewards-sub-2">Spend coins on tier-locked rewards.</div>
         </div>
-        <button type="submit" class="np-pill np-pill--grape np-pill--block">Save email</button>
-      </form>
-    </div>
-
-    <!-- Phone -->
-    <div class="np-account-section">
-      <form id="form-phone">
-        <div class="np-field">
-          <label class="np-field__label" for="account-phone">Mobile</label>
-          <input type="tel" class="np-input" id="account-phone" placeholder="+15551234567" autocomplete="tel">
-          <div class="np-field__hint">E.164 format. Saving calls <code>OneSignal.User.addSms()</code>.</div>
-        </div>
-        <button type="submit" class="np-pill np-pill--grape np-pill--block">Save mobile</button>
-      </form>
-    </div>
-
-    <!-- Custom tag -->
-    <div class="np-account-section">
-      <form id="form-tag">
-        <label class="np-field__label">Custom personalisation tag</label>
-        <div class="np-tag-row">
-          <input type="text" class="np-input" id="tag-key" placeholder="key (e.g. favourite_pet)">
-          <input type="text" class="np-input" id="tag-val" placeholder="value (e.g. aisha)">
-        </div>
-        <div class="np-field__hint">Saving calls <code>OneSignal.User.addTags({ key: value })</code>.</div>
-        <div class="np-tag-list" id="tag-history"></div>
-        <button type="submit" class="np-pill np-pill--grape np-pill--block" style="margin-top:10px;">Add tag</button>
-      </form>
-    </div>
-
-    <!-- Logout — lives only inside the account view per the skill rules -->
-    <div class="np-account-section">
-      <button class="np-pill np-pill--dark np-pill--block" id="btn-logout">Sign Out</button>
+      </div>
+      <div id="rewards-grid-2" class="np-rewards"></div>
     </div>
   </div>
-</div>
+</section>
 
-<!-- ============================================================
-     TOAST
-     ============================================================ -->
-<div class="np-toast" id="toast" role="status" aria-live="polite"></div>
-
-<footer class="np-foot">
-  Neopia web companion · OneSignal identity stitching demo · <strong>Web ↔ iOS</strong>
+<footer class="np-footer">
+  <span id="footer-note">Demo built for OneSignal walkthroughs.</span>
 </footer>
 
-<!-- ============================================================
-     APP SCRIPT
-     ============================================================ -->
+<div id="theme-tag" class="np-theme-tag">theme: questkeep</div>
+
+<!-- ============== AUTH MODALS ============== -->
+<div class="np-modal-backdrop" id="modal-auth-choose">
+  <div class="np-modal">
+    <div class="np-modal__head">
+      <h2 id="auth-choose-title">Sign in or join</h2>
+      <button class="np-modal__close" data-close-modal>✕</button>
+    </div>
+    <div class="np-modal__body">
+      <p style="color:var(--color-text-muted);margin-bottom:16px;">Pick one to continue.</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button id="btn-show-register" class="np-pill np-pill--grape">Join (new)</button>
+        <button id="btn-show-signin"   class="np-pill np-pill--ghost">Sign in (returning)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="np-modal-backdrop" id="modal-register">
+  <div class="np-modal">
+    <div class="np-modal__head">
+      <h2 id="register-title">Join</h2>
+      <button class="np-modal__close" data-close-modal>✕</button>
+    </div>
+    <div class="np-modal__body">
+      <div id="register-error" class="np-error"></div>
+      <form id="form-register" novalidate>
+        <div class="np-field">
+          <label class="np-field__label" for="register-name">Name <span style="color:var(--color-danger);">*</span></label>
+          <input class="np-field__input" id="register-name" type="text" placeholder="What should we call you?" required>
+        </div>
+        <div class="np-field">
+          <label class="np-field__label" for="register-email" id="register-email-label">Email (optional)</label>
+          <input class="np-field__input" id="register-email" type="email" placeholder="you@example.com">
+          <div class="np-field__hint">Optional. If provided, fires <code>OneSignal.User.addEmail()</code>.</div>
+        </div>
+        <div class="np-field">
+          <label class="np-field__label" for="register-phone" id="register-phone-label">Mobile (optional, E.164)</label>
+          <input class="np-field__input" id="register-phone" type="tel" placeholder="+15551234567">
+          <div class="np-field__hint">Optional. If provided, fires <code>OneSignal.User.addSms()</code>.</div>
+        </div>
+        <div class="np-modal__footer">
+          <button type="button" class="np-link" id="link-to-signin">Have an account? Sign in</button>
+          <button type="submit" class="np-pill np-pill--grape">Create account</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="np-modal-backdrop" id="modal-signin">
+  <div class="np-modal">
+    <div class="np-modal__head">
+      <h2 id="signin-title">Sign in</h2>
+      <button class="np-modal__close" data-close-modal>✕</button>
+    </div>
+    <div class="np-modal__body">
+      <div id="signin-error" class="np-error"></div>
+      <form id="form-signin" novalidate>
+        <div class="np-field">
+          <label class="np-field__label" for="signin-name">Name <span style="color:var(--color-danger);">*</span></label>
+          <input class="np-field__input" id="signin-name" type="text" placeholder="Your name on this device" required>
+          <div class="np-field__hint">We look up your stored UUID by name on this device.</div>
+        </div>
+        <div class="np-modal__footer">
+          <button type="button" class="np-link" id="link-to-register">No account? Create one</button>
+          <button type="submit" class="np-pill np-pill--grape">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ============== ACCOUNT MODAL ============== -->
+<div class="np-modal-backdrop" id="modal-account">
+  <div class="np-modal" style="max-width:560px;">
+    <div class="np-modal__head">
+      <h2 id="account-title">My Account</h2>
+      <button class="np-modal__close" data-close-modal>✕</button>
+    </div>
+    <div class="np-modal__body">
+      <div class="np-account-grid">
+        <div class="np-account-meta">
+          <div class="np-account-meta__row">
+            <span class="np-account-meta__label" id="account-name-label">Hi,</span>
+            <span class="np-account-meta__value" id="account-name-sub">—</span>
+          </div>
+          <div class="np-account-meta__row">
+            <span class="np-account-meta__label">External ID</span>
+            <span class="np-account-meta__value" id="account-uuid">—</span>
+          </div>
+          <div class="np-account-meta__row">
+            <span class="np-account-meta__label">Tier</span>
+            <span class="np-account-meta__value" id="account-tier">Bronze</span>
+          </div>
+          <div class="np-account-meta__row">
+            <span class="np-account-meta__label">Streak</span>
+            <span class="np-account-meta__value" id="account-streak">0</span>
+          </div>
+        </div>
+
+        <form id="form-email" class="np-account-form">
+          <div class="np-account-form__title" id="account-email-title">Email</div>
+          <div class="np-account-form__row">
+            <div class="np-field">
+              <input class="np-field__input" id="account-email" type="email" placeholder="you@example.com">
+              <div class="np-field__hint" id="account-email-hint">Saving fires OneSignal.User.addEmail().</div>
+            </div>
+            <button type="submit" class="np-pill np-pill--grape np-pill--small">Save</button>
+          </div>
+        </form>
+
+        <form id="form-phone" class="np-account-form">
+          <div class="np-account-form__title" id="account-phone-title">Mobile (E.164)</div>
+          <div class="np-account-form__row">
+            <div class="np-field">
+              <input class="np-field__input" id="account-phone" type="tel" placeholder="+15551234567">
+              <div class="np-field__hint" id="account-phone-hint">Saving fires OneSignal.User.addSms().</div>
+            </div>
+            <button type="submit" class="np-pill np-pill--grape np-pill--small">Save</button>
+          </div>
+        </form>
+
+        <!-- Premium upgrade — toggles the account_type tag between
+             "free" and "premium" so the SE can demo both states. -->
+        <div class="np-account-form" id="premium-card">
+          <div class="np-account-form__title" id="premium-title">Account type</div>
+          <div class="np-account-form__row">
+            <div class="np-field">
+              <div class="np-field__hint" id="premium-status-text">Currently: free</div>
+              <div class="np-field__hint" id="premium-hint">Updates account_type tag from "free" to "premium".</div>
+            </div>
+            <button id="btn-upgrade-premium"  class="np-pill np-pill--orange np-pill--small">Upgrade to Premium</button>
+            <button id="btn-downgrade-premium" class="np-pill np-pill--ghost np-pill--small" hidden>Downgrade to Free</button>
+          </div>
+        </div>
+
+        <form id="form-tag" class="np-account-form">
+          <div class="np-account-form__title" id="account-tag-title">Custom tag</div>
+          <div class="np-account-form__row" style="gap:8px;">
+            <div class="np-field" style="flex:0 0 38%;">
+              <input class="np-field__input" id="tag-key" type="text" placeholder="key">
+            </div>
+            <div class="np-field" style="flex:1;">
+              <input class="np-field__input" id="tag-val" type="text" placeholder="value">
+            </div>
+            <button type="submit" class="np-pill np-pill--grape np-pill--small">Add</button>
+          </div>
+          <div class="np-field__hint" id="account-tag-hint">Saving fires OneSignal.User.addTags({ key: value }).</div>
+          <div id="tag-history" class="np-tag-chips"></div>
+        </form>
+
+        <div class="np-modal__footer">
+          <button id="btn-logout" class="np-pill np-pill--ghost" style="border-color:var(--color-danger);color:var(--color-danger);">Log out</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="np-toast"></div>
+
+<!-- =================================================================
+     APP SCRIPT — applyTheme() + OneSignal helpers + screens + auth.
+     ================================================================= -->
 <script>
-(function() {
+(function () {
   "use strict";
 
-  // ----------------------------------------------------------
+  // ===========================================================
+  // applyTheme() — runs at boot. Wires THEME_CONFIG into:
+  //   - CSS custom properties (colors, fonts, radii, shadows)
+  //   - Document title + favicon + Google fonts <link>
+  //   - Brand mark, nav labels, section headings, all copy
+  //   - Streak grid, rewards grid, games grid, account view
+  // The same function is re-callable; if a customer needs a live
+  // theme swap, just call applyTheme(window.THEME_CONFIG) again.
+  // ===========================================================
+  function applyTheme(cfg) {
+    if (!cfg) {
+      console.error("[theme] THEME_CONFIG missing — using fallback defaults");
+      return;
+    }
+    var r = document.documentElement;
+
+    // --- colors -> --color-* CSS vars
+    var c = cfg.colors || {};
+    var colorMap = {
+      "bg":             "--color-bg",
+      "bgGrad":         "--color-bg-grad",
+      "surface":        "--color-surface",
+      "surfaceSoft":    "--color-surface-soft",
+      "primary":        "--color-primary",
+      "primaryDark":    "--color-primary-dark",
+      "primaryLight":   "--color-primary-light",
+      "accent":         "--color-accent",
+      "accentDark":     "--color-accent-dark",
+      "secondary":      "--color-secondary",
+      "secondaryDark":  "--color-secondary-dark",
+      "strawberry":     "--color-strawberry",
+      "text":           "--color-text",
+      "textMuted":      "--color-text-muted",
+      "success":        "--color-success",
+      "danger":         "--color-danger",
+      "slate100":       "--color-slate-100",
+      "slate400":       "--color-slate-400",
+      "slate700":       "--color-slate-700",
+      "cardShadow":     "--shadow-card",
+      "popShadow":      "--shadow-pop"
+    };
+    Object.keys(colorMap).forEach(function (k) {
+      if (c[k] !== undefined) r.style.setProperty(colorMap[k], c[k]);
+    });
+
+    // --- radii
+    if (cfg.radii) {
+      if (cfg.radii.pill)  r.style.setProperty("--radius-pill",  cfg.radii.pill);
+      if (cfg.radii.card)  r.style.setProperty("--radius-card",  cfg.radii.card);
+      if (cfg.radii.inset) r.style.setProperty("--radius-inset", cfg.radii.inset);
+    }
+
+    // --- fonts
+    if (cfg.fonts) {
+      if (cfg.fonts.display) r.style.setProperty("--font-display", cfg.fonts.display);
+      if (cfg.fonts.body)    r.style.setProperty("--font-body",    cfg.fonts.body);
+      if (cfg.fonts.googleFontHref) {
+        var fontLink = document.getElementById("theme-fonts");
+        if (fontLink) fontLink.href = cfg.fonts.googleFontHref;
+      }
+    }
+
+    // --- title + favicon + meta description
+    var brand = cfg.brand || {};
+    var copy  = cfg.copy  || {};
+    if (copy.pageTitle)        document.title = copy.pageTitle;
+    if (copy.pageDescription) {
+      var d = document.getElementById("theme-description");
+      if (d) d.setAttribute("content", copy.pageDescription);
+    }
+    if (brand.favicon) {
+      var fav = document.getElementById("theme-favicon");
+      if (fav) fav.href = brand.favicon;
+    }
+    setText("brand-mark",  brand.initial   || "?");
+    setText("brand-name",  brand.shortName || brand.name || "Demo");
+
+    // --- nav labels
+    setText("nav-home-label",    copy.navHomeLabel    || "Home");
+    setText("nav-game-label",    copy.navGameLabel    || "Play");
+    setText("nav-rewards-label", copy.navRewardsLabel || "Rewards");
+
+    // --- top-nav CTA
+    setText("btn-open-auth", copy.signInRegisterCta || "Sign In / Join");
+
+    // --- hero
+    setText("hero-eyebrow",     copy.heroEyebrow || "");
+    setText("hero-title",       copy.heroTitle   || "");
+    setText("hero-cta-register", copy.registerCta || "Join");
+    setText("hero-cta-signin",   copy.signInCta   || "Sign in");
+    setText("hero-cta-subscribe", copy.heroPushCta || "Get alerts");
+
+    // --- stat cards
+    setText("streak-label",  copy.statsStreakLabel  || "Streak");
+    setText("tier-label",    copy.statsTierLabel    || "Tier");
+    setText("balance-label", copy.statsBalanceLabel || "Coins");
+    var primaryCur = (cfg.currency && cfg.currency.primary) || {};
+    setText("balance-np", numberFmt(parseInt(primaryCur.balance || "0", 10)));
+    setText("balance-sub", (primaryCur.symbol || "★") + " across all surfaces");
+
+    // --- daily streak section
+    setText("streak-title", copy.streakTitle  || "Daily reward");
+    setText("btn-claim-daily", copy.claimDailyCta || "Claim today");
+
+    // --- games section
+    setText("games-title", copy.gamesTitle || "Games");
+    setText("games-sub",   copy.gamesSub   || "");
+
+    // --- rewards section (and the rewards screen mirror)
+    setText("rewards-title",   copy.rewardsTitle || "Rewards");
+    setText("rewards-sub",     copy.rewardsSub   || "");
+    setText("rewards-title-2", copy.rewardsTitle || "Rewards");
+    setText("rewards-sub-2",   copy.rewardsSub   || "");
+
+    // --- play screen
+    setText("play-eyebrow", "Level " + ((cfg.playScreen && cfg.playScreen.levelNumber) || 1));
+    setText("play-title",   copy.gameScreenTitle || "Play");
+    setText("play-sub",     copy.gameScreenSub   || "");
+    setText("btn-play-start",    copy.gameStartCta    || "Start");
+    setText("btn-play-complete", copy.gameCompleteCta || "Complete");
+    setText("btn-play-retry",    copy.gameRetryCta    || "Try again");
+    var heroEl = document.getElementById("play-hero");
+    if (heroEl && cfg.playScreen && cfg.playScreen.heroImage) {
+      heroEl.style.backgroundImage = "url('" + cfg.playScreen.heroImage + "')";
+    }
+
+    // --- account modal
+    setText("account-title",         copy.accountTitle      || "My Account");
+    setText("account-name-label",    copy.accountChipPrefix || "Hi,");
+    setText("account-email-title",   copy.accountEmailLabel || "Email");
+    setText("account-email-hint",    copy.accountEmailHint  || "");
+    setText("account-phone-title",   copy.accountPhoneLabel || "Mobile");
+    setText("account-phone-hint",    copy.accountPhoneHint  || "");
+    setText("account-tag-title",     copy.accountTagLabel   || "Custom tag");
+    setText("account-tag-hint",      copy.accountTagHint    || "");
+    setText("btn-logout",            copy.logoutCta         || "Log out");
+    setText("btn-upgrade-premium",   copy.upgradePremiumCta || "Upgrade to Premium");
+    setText("premium-hint",          copy.upgradePremiumHint || "");
+
+    // --- footer + theme indicator
+    setText("footer-note",  copy.footerNote || "");
+    setText("theme-tag",    "theme: " + ((cfg.meta && cfg.meta.slug) || "default"));
+  }
+
+  function setText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
+
+  // Run applyTheme() now if THEME_CONFIG already loaded, otherwise wait.
+  if (window.THEME_CONFIG) {
+    applyTheme(window.THEME_CONFIG);
+  } else {
+    var tries = 0, iv = setInterval(function () {
+      if (window.THEME_CONFIG) { clearInterval(iv); applyTheme(window.THEME_CONFIG); return; }
+      if (++tries > 50) { clearInterval(iv); console.error("[theme] never loaded"); }
+    }, 50);
+  }
+
+  // ===========================================================
   // OneSignal helpers — use the deferred queue so calls run
   // against the initialised SDK instance regardless of order.
-  // ----------------------------------------------------------
+  // The queue guarantees the visitor flow described at the top
+  // of this file: init() and addTags() always run before
+  // login() can fire.
+  // ===========================================================
   function withOneSignal(fn) {
-    if (window.__neopets_sdk_ready && window.OneSignal) {
+    if (window.__os_sdk_ready && window.OneSignal) {
       try { fn(window.OneSignal); } catch (e) { console.error(e); }
       return;
     }
-    window.__neopets_sdk_queue = window.__neopets_sdk_queue || [];
-    window.__neopets_sdk_queue.push(fn);
+    window.__os_sdk_queue = window.__os_sdk_queue || [];
+    window.__os_sdk_queue.push(fn);
   }
 
+  /* osLogin(externalId)
+     ------------------
+     Per the brief: this is the function the auth flow calls when the
+     visitor authenticates. It must invoke OneSignal.login(externalId)
+     so OneSignal stitches the anonymous session and its tags to the
+     authenticated user. We route through withOneSignal() so the call
+     waits for OneSignal.init() and the anonymous addTags() to finish. */
   function osLogin(externalId) {
-    withOneSignal(OneSignal => {
-      console.log("[OneSignal] login()", externalId);
+    withOneSignal(function (OneSignal) {
+      console.log("%c[OneSignal] login()", "color:#6B3FBE;font-weight:700;", externalId);
       OneSignal.login(externalId);
     });
   }
   function osLogout() {
-    withOneSignal(OneSignal => {
+    withOneSignal(function (OneSignal) {
       console.log("[OneSignal] logout()");
       OneSignal.logout();
     });
   }
   function osAddEmail(email) {
-    if (!email) return;
-    withOneSignal(OneSignal => {
+    if (!email) return;                         // never call with empty
+    withOneSignal(function (OneSignal) {
       console.log("[OneSignal] addEmail()", email);
       OneSignal.User.addEmail(email);
     });
   }
   function osAddSms(phone) {
-    if (!phone) return;
-    withOneSignal(OneSignal => {
+    if (!phone) return;                         // never call with empty
+    withOneSignal(function (OneSignal) {
       console.log("[OneSignal] addSms()", phone);
       OneSignal.User.addSms(phone);
     });
   }
   function osAddTags(tags) {
-    withOneSignal(OneSignal => {
+    if (!tags || !Object.keys(tags).length) return;
+    withOneSignal(function (OneSignal) {
       console.log("[OneSignal] addTags()", tags);
       OneSignal.User.addTags(tags);
     });
   }
   function osTrack(eventName, props) {
-    withOneSignal(OneSignal => {
+    withOneSignal(function (OneSignal) {
       console.log("[OneSignal] trackEvent()", eventName, props);
       OneSignal.User.trackEvent(eventName, props || {});
     });
   }
 
-  // ----------------------------------------------------------
-  // Push subscription — only offered to LOGGED-IN users. The button stays
-  // hidden for anonymous visitors so the opt-in is gated behind sign-in.
-  // (Anonymous users are still captured in OneSignal via init() + the env
-  // tags fired at boot — they just don't get the push permission prompt.)
-  // ----------------------------------------------------------
-  function syncSubscribeButton() {
-    withOneSignal(OneSignal => {
-      const granted = !!OneSignal.Notifications.permission;
-      const btn = document.getElementById("hero-cta-subscribe");
-      if (!btn) return;
-      // Hide unless: user is authed AND permission is not yet granted.
-      btn.hidden = granted || !state.isAuthed;
-      if (granted) {
-        OneSignal.User.addTags({ push_opted_in: "true" });
-      }
+  /* osAddTrigger(key, value)
+     ------------------------
+     Fires OneSignal.InAppMessages.addTrigger(key, value). The Web SDK
+     v16 supports In-App message triggers. Per the SE Demo Design skill
+     default, web projects skip In-App triggers entirely (push-permission
+     prompting on web is dashboard-configured). The customer here has
+     explicitly requested two app-level triggers — `show_prompt` after
+     first game session, `low_currency` when balance dips below threshold —
+     which the dashboard will use to display arbitrary In-App messages,
+     not to prompt for push permission. */
+  function osAddTrigger(key, value) {
+    withOneSignal(function (OneSignal) {
+      console.log("%c[OneSignal] addTrigger()", "color:#F5A623;font-weight:700;", key, value);
+      OneSignal.InAppMessages.addTrigger(key, value);
     });
   }
-  // Expose to the deferred-init block at the top of the page.
-  window.__neopets_syncSubscribe = syncSubscribeButton;
+
+  // Expose for console-driven SE testing.
+  window.osLogin       = osLogin;
+  window.osLogout      = osLogout;
+  window.osAddEmail    = osAddEmail;
+  window.osAddSms      = osAddSms;
+  window.osAddTags     = osAddTags;
+  window.osTrack       = osTrack;
+  window.osAddTrigger  = osAddTrigger;
+
+  // ===========================================================
+  // Push permission (web) — gated to logged-in visitors.
+  // Per the SE skill rules, web projects do NOT use addTrigger();
+  // push prompting on web is configured through the OneSignal
+  // dashboard. We only call requestPermission() directly.
+  // ===========================================================
+  function syncSubscribeButton() {
+    withOneSignal(function (OneSignal) {
+      var granted = !!OneSignal.Notifications.permission;
+      var btn = document.getElementById("hero-cta-subscribe");
+      if (!btn) return;
+      btn.hidden = granted || !state.isAuthed;
+      // (No tag is set here — the customer's tag schema is restricted
+      // to player_level / currency_balance / last_played / account_type.
+      // Push subscription state is reflected in OneSignal's built-in
+      // notification_types segmentation, not as a custom tag.)
+    });
+  }
+  window.__app_syncSubscribe = syncSubscribeButton;
 
   async function requestPushPermission() {
-    if (!window.__neopets_sdk_ready || !window.OneSignal) {
+    if (!window.__os_sdk_ready || !window.OneSignal) {
       toast("OneSignal SDK still loading — try again in a moment.");
       return;
     }
-    const OneSignal = window.OneSignal;
-    if (OneSignal.Notifications.permission) {
-      toast("Already subscribed to push.");
-      syncSubscribeButton();
-      return;
-    }
-    console.log("%c[OneSignal] requestPermission()", "color:#FF7A00;font-weight:700;");
+    var OneSignal = window.OneSignal;
+    if (OneSignal.Notifications.permission) { toast("Already subscribed."); syncSubscribeButton(); return; }
     try {
       await OneSignal.Notifications.requestPermission();
-      const granted = !!OneSignal.Notifications.permission;
-      console.log("%c[OneSignal] permission result: " + granted, "color:#FF7A00;font-weight:700;");
-      if (granted) {
-        OneSignal.User.addTags({ push_opted_in: "true" });
-        toast("Subscribed! Check OneSignal → Audience → Users.");
-      } else {
-        OneSignal.User.addTags({ push_opted_in: "false" });
-        toast("Permission dismissed.");
-      }
+      var granted = !!OneSignal.Notifications.permission;
+      // No tag write here — see syncSubscribeButton() comment above.
+      toast(granted ? "Subscribed! Check OneSignal → Audience." : "Permission dismissed.");
       syncSubscribeButton();
     } catch (e) {
-      console.error("[OneSignal] permission request failed", e);
+      console.error("[OneSignal] permission error", e);
       toast("Couldn't request permission — see console.");
     }
   }
 
-  // ----------------------------------------------------------
-  // Storage keys
-  // ----------------------------------------------------------
-  const KEY_UUID    = "onesignal_user_uuid";
-  const KEY_PROFILE = "neopets_profile";          // { name, email, phone, registeredAt }
-  const KEY_STREAK  = "neopets_streak";           // { lastClaimDate, days }
-  const KEY_TAGS    = "neopets_custom_tags";      // [{ key, value }]
-  const KEY_TIER    = "neopets_tier";
+  // ===========================================================
+  // Storage keys — all per-customer values are scoped under the
+  // theme slug so two themes on the same browser don't collide.
+  // ===========================================================
+  var slug = (window.THEME_CONFIG && window.THEME_CONFIG.meta && window.THEME_CONFIG.meta.slug) || "default";
+  var KEY_UUID       = "onesignal_user_uuid";        // matches the SE skill spec
+  var KEY_PROFILE    = "demo_profile_"    + slug;    // { name, email, phone, externalId, registeredAt }
+  var KEY_STREAK     = "demo_streak_"     + slug;    // { lastClaimDate, days }
+  var KEY_TAGS       = "demo_tags_"       + slug;    // [{ key, value }] — for the account-view custom tag history
+  var KEY_TIER       = "demo_tier_"       + slug;    // loyalty tier string
+  var KEY_USERS      = "demo_users_"      + slug;    // { name -> externalId }
+  var KEY_BALANCE    = "demo_balance_"    + slug;    // currency_balance integer
+  var KEY_PLAYERLVL  = "demo_player_lvl_" + slug;    // player_level integer
+  var KEY_FIRSTGAME  = "demo_firstgame_"  + slug;    // "true" once first game session completes
+  var KEY_PREMIUM    = "demo_premium_"    + slug;    // "true" if account_type is "premium"
 
-  // ----------------------------------------------------------
-  // Identity API — replaces local UUID generation
-  // ----------------------------------------------------------
-  const API_BASE = "https://onesignal-api-server-production-6bda.up.railway.app";
-  const APP_ID   = "4535c4ef-3ac5-4d09-901e-ba18c1082cba";
-
-  async function apiCall(method, path, body) {
-    const opts = {
-      method,
-      headers: { "Content-Type": "application/json" }
-    };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(API_BASE + path, opts);
-    const data = await res.json();
-    if (!res.ok) {
-      const err = new Error(data.detail || data.message || "API error");
-      err.status = res.status;
-      err.data = data;
-      throw err;
-    }
-    return data;
-  }
-
-  // ----------------------------------------------------------
-  // Loyalty tier derivation (mirrors iOS lapsed-player schema)
-  // ----------------------------------------------------------
-  function tierForStreak(days) {
-    if (days >= 30) return "platinum";
-    if (days >= 14) return "gold";
-    if (days >= 7)  return "silver";
-    return "bronze";
-  }
-  function tierDisplay(tier) {
-    return tier.charAt(0).toUpperCase() + tier.slice(1);
-  }
-
-  // ----------------------------------------------------------
-  // Daily reward table — one entry per day-in-streak
-  // ----------------------------------------------------------
-  const STREAK_REWARDS = [
-    { day: 1, label: "100 NP",   np: 100,  type: "neopoints"  },
-    { day: 2, label: "150 NP",   np: 150,  type: "neopoints"  },
-    { day: 3, label: "Mystery",  np: 250,  type: "mystery_box"},
-    { day: 4, label: "300 NP",   np: 300,  type: "neopoints"  },
-    { day: 5, label: "400 NP",   np: 400,  type: "neopoints"  },
-    { day: 6, label: "500 NP",   np: 500,  type: "neopoints"  },
-    { day: 7, label: "Faerie",   np: 1000, type: "faerie_item"}
-  ];
-
-  // ----------------------------------------------------------
-  // Loyalty rewards (mirrors iOS Rewards Hub)
-  // ----------------------------------------------------------
-  const LOYALTY_REWARDS = [
-    { id: "np_500_pack",      name: "500 NP Bonus",       desc: "A small Neopoints boost.",                     points: 500,  tier: "bronze",   icon: "★" },
-    { id: "rare_paint_brush", name: "Rare Paint Brush",   desc: "Repaint one of your pets in a rare colour.",   points: 1500, tier: "silver",   icon: "🎨" },
-    { id: "faerie_quest_pack", name: "Faerie Quest Pack", desc: "Three faerie quests on the house.",             points: 2200, tier: "gold",     icon: "✨" },
-    { id: "platinum_avatar",  name: "Platinum Avatar",    desc: "An exclusive avatar only platinum members get.", points: 4500, tier: "platinum", icon: "👑" }
-  ];
-  const TIER_ORDER = ["bronze", "silver", "gold", "platinum"];
-
-  // ----------------------------------------------------------
+  // ===========================================================
   // App state
-  // ----------------------------------------------------------
-  const state = {
+  // ===========================================================
+  var state = {
     isAuthed: false,
-    user: null,           // { name, email, phone, externalId, registeredAt }
+    user: null,                                      // { name, email, phone, externalId, registeredAt }
     streak: { lastClaimDate: null, days: 0 },
     tier: "bronze",
-    customTags: []
+    customTags: [],
+    play: { score: 0, startedAt: 0, isPlaying: false, completed: false },
+    balance: 0,                                      // currency_balance value
+    playerLevel: 1,                                  // player_level value
+    firstGameDone: false,                            // toggles after game_session_completed; gates show_prompt trigger
+    isPremium: false,                                // toggles account_type tag between "free" and "premium"
+    quest: { sacrificed: [], totalNeeded: 0, completed: false }
   };
 
-  // ----------------------------------------------------------
-  // DOM helpers
-  // ----------------------------------------------------------
-  const $  = sel => document.querySelector(sel);
-  const $$ = sel => Array.from(document.querySelectorAll(sel));
+  // ===========================================================
+  // Customer tag-update helpers — the SINGLE SOURCE OF TRUTH for
+  // every customer-facing user tag. The schema is intentionally
+  // narrow:
+  //   • player_level     — current level/progression marker
+  //   • currency_balance — primary currency balance
+  //   • last_played      — YYYY-MM-DD of the most recent session
+  //   • account_type     — "free" or "premium"
+  // No other addTags() calls should be made from this app code.
+  // ===========================================================
+  function setPlayerLevel(level) {
+    state.playerLevel = level;
+    window.localStorage.setItem(KEY_PLAYERLVL, String(level));
+    osAddTags({ player_level: String(level) });
+  }
+  function setCurrencyBalance(balance, reason) {
+    state.balance = Math.max(0, Math.round(balance));
+    window.localStorage.setItem(KEY_BALANCE, String(state.balance));
+    osAddTags({ currency_balance: String(state.balance) });
+    setText("balance-np", numberFmt(state.balance));
+    // low_currency In-App trigger — fires when balance dips below
+    // the threshold defined in THEME_CONFIG.economy.lowCurrencyThreshold.
+    var threshold = ((window.THEME_CONFIG && window.THEME_CONFIG.economy && window.THEME_CONFIG.economy.lowCurrencyThreshold) | 0) || 500;
+    if (state.balance < threshold) osAddTrigger("low_currency", "true");
+    if (reason) console.log("[balance]", reason, "→", state.balance);
+  }
+  function setLastPlayedToday() {
+    osAddTags({ last_played: todayISO() });
+  }
+  function setAccountType(type) {
+    state.isPremium = type === "premium";
+    window.localStorage.setItem(KEY_PREMIUM, state.isPremium ? "true" : "false");
+    osAddTags({ account_type: type });
+    renderPremiumState();
+  }
 
-  let toastTimeout;
+  // ===========================================================
+  // DOM helpers
+  // ===========================================================
+  function $(s) { return document.querySelector(s); }
+  function $$(s) { return Array.from(document.querySelectorAll(s)); }
+
+  var toastTimeout;
   function toast(msg) {
-    const el = $("#toast");
+    var el = $("#toast");
     el.textContent = msg;
     el.classList.add("is-visible");
     clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => el.classList.remove("is-visible"), 2800);
+    toastTimeout = setTimeout(function () { el.classList.remove("is-visible"); }, 2800);
   }
 
-  // ----------------------------------------------------------
-  // Modal handling
-  // ----------------------------------------------------------
   function openModal(id) {
     closeAllModals();
-    const m = document.getElementById(id);
+    var m = document.getElementById(id);
     if (m) m.classList.add("is-open");
   }
-  function closeAllModals() {
-    $$(".np-modal-backdrop").forEach(m => m.classList.remove("is-open"));
-  }
+  function closeAllModals() { $$(".np-modal-backdrop").forEach(function (m) { m.classList.remove("is-open"); }); }
 
-  // Click outside or close button
-  $$(".np-modal-backdrop").forEach(backdrop => {
-    backdrop.addEventListener("click", e => {
-      if (e.target === backdrop || e.target.matches("[data-close-modal]")) {
-        closeAllModals();
-      }
+  $$(".np-modal-backdrop").forEach(function (b) {
+    b.addEventListener("click", function (e) {
+      if (e.target === b || e.target.matches("[data-close-modal]")) closeAllModals();
     });
   });
-  document.addEventListener("keydown", e => {
-    if (e.key === "Escape") closeAllModals();
-  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeAllModals(); });
 
-  // ----------------------------------------------------------
+  // ===========================================================
   // Routing
-  // ----------------------------------------------------------
+  // ===========================================================
   function goTo(route) {
-    $$(".np-nav__item").forEach(b => b.classList.toggle("is-active", b.dataset.route === route));
-    $$(".np-screen").forEach(s => s.classList.toggle("is-active", s.dataset.screen === route));
+    $$(".np-nav__item").forEach(function (b) { b.classList.toggle("is-active", b.dataset.route === route); });
+    $$(".np-screen").forEach(function (s) { s.classList.toggle("is-active", s.dataset.screen === route); });
     window.scrollTo({ top: 0, behavior: "smooth" });
-    // Fires for anonymous AND authed users — anonymous events attach to the
-    // OneSignal anonymous user created on init(), and persist after login.
-    osTrack("screen_viewed", {
-      screen_name: route,
-      is_authed:   state.isAuthed ? "true" : "false",
-      timestamp:   new Date().toISOString()
-    });
+    // Note: screen_viewed event intentionally NOT fired — the customer
+    // schema is restricted to the four named events.
   }
-  document.body.addEventListener("click", e => {
-    const t = e.target.closest("[data-route]");
-    if (t) {
-      goTo(t.dataset.route);
-    }
+  document.body.addEventListener("click", function (e) {
+    var t = e.target.closest("[data-route]");
+    if (t) goTo(t.dataset.route);
   });
 
-  // ----------------------------------------------------------
-  // Auth — gatekeeper for opening the auth picker. Skill rule:
-  // a logged-in user must NOT be able to reach the auth screens.
-  // ----------------------------------------------------------
+  // ===========================================================
+  // Auth UI gates
+  // ===========================================================
   function guardOpenAuth() {
-    if (state.isAuthed) {
-      openModal("modal-account");
-    } else {
-      openModal("modal-auth-choose");
-    }
+    if (state.isAuthed) openModal("modal-account");
+    else                openModal("modal-auth-choose");
   }
   $("#btn-open-auth").addEventListener("click", guardOpenAuth);
-  $("#hero-cta-register").addEventListener("click", () => {
+  $("#hero-cta-register").addEventListener("click", function () {
     if (state.isAuthed) return;
     openModal("modal-register");
   });
-  $("#hero-cta-signin").addEventListener("click", () => {
+  $("#hero-cta-signin").addEventListener("click", function () {
     if (state.isAuthed) return;
     openModal("modal-signin");
   });
-  $("#btn-show-register").addEventListener("click", () => openModal("modal-register"));
-  $("#btn-show-signin").addEventListener("click",   () => openModal("modal-signin"));
-  $("#link-to-register").addEventListener("click",  () => openModal("modal-register"));
-  $("#link-to-signin").addEventListener("click",    () => openModal("modal-signin"));
+  $("#btn-show-register").addEventListener("click", function () { openModal("modal-register"); });
+  $("#btn-show-signin").addEventListener("click",   function () { openModal("modal-signin"); });
+  $("#link-to-register").addEventListener("click",  function () { openModal("modal-register"); });
+  $("#link-to-signin").addEventListener("click",    function () { openModal("modal-signin"); });
 
-  // Push subscribe — gated to authed users. The button is hidden until the
-  // user has logged in (see syncSubscribeButton()). Anonymous capture still
-  // happens automatically via OneSignal.init() + env tags at boot.
   $("#hero-cta-subscribe").addEventListener("click", requestPushPermission);
+  $("#btn-open-account").addEventListener("click", function () { if (state.isAuthed) openModal("modal-account"); });
 
-  // Account
-  $("#btn-open-account").addEventListener("click",  () => state.isAuthed && openModal("modal-account"));
-  $("#btn-edit-account").addEventListener("click",  () => state.isAuthed && openModal("modal-account"));
+  // ===========================================================
+  // UUID generator — 8 hex chars, per SE skill
+  // ===========================================================
+  function gen8CharUuid() {
+    var bytes = new Uint8Array(4);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    return Array.from(bytes).map(function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+  }
 
-  // ----------------------------------------------------------
-  // Register / Sign In / Logout
-  // ----------------------------------------------------------
-  $("#form-register").addEventListener("submit", async e => {
+  // ===========================================================
+  // Local username -> externalId map (replaces API server)
+  // ===========================================================
+  function readUsers() {
+    try { return JSON.parse(window.localStorage.getItem(KEY_USERS) || "{}"); }
+    catch (_) { return {}; }
+  }
+  function writeUsers(u) { window.localStorage.setItem(KEY_USERS, JSON.stringify(u)); }
+
+  // ===========================================================
+  // Register
+  // ===========================================================
+  $("#form-register").addEventListener("submit", function (e) {
     e.preventDefault();
-    const errBox = $("#register-error");
-    errBox.classList.remove("is-visible");
-
-    const name  = $("#register-name").value.trim();
-    const email = $("#register-email").value.trim();
-    const phone = $("#register-phone").value.trim();
+    var errBox = $("#register-error"); errBox.classList.remove("is-visible");
+    var name  = $("#register-name").value.trim();
+    var email = $("#register-email").value.trim();
+    var phone = $("#register-phone").value.trim();
 
     if (!name) {
       errBox.textContent = "Please enter a name to continue.";
@@ -1535,401 +1214,543 @@ footer.np-foot strong { color: var(--np-gold-500); }
       return;
     }
 
-    let apiUser;
-    try {
-      apiUser = await apiCall("POST", "/users/register", {
-        username: name, app_id: APP_ID
-      });
-    } catch (err) {
-      // Username already taken — offer to log in instead.
-      if (err.status === 409 || (err.data && /already/.test(err.data.detail || ""))) {
-        errBox.innerHTML =
-          'That username is taken. <button type="button" id="register-try-login" ' +
-          'style="color:var(--np-orange);text-decoration:underline;background:none;border:none;cursor:pointer;">' +
-          'Sign in instead?</button>';
-        errBox.classList.add("is-visible");
-        const loginBtn = document.getElementById("register-try-login");
-        if (loginBtn) loginBtn.addEventListener("click", async () => {
-          try {
-            apiUser = await apiCall("POST", "/users/login", {
-              username: name, app_id: APP_ID
-            });
-            finishAuth(apiUser, email, phone, false);
-          } catch (loginErr) {
-            errBox.textContent = loginErr.message || "Login failed. Please try again.";
-            errBox.classList.add("is-visible");
-          }
-        });
-        return;
-      }
-      errBox.textContent = err.message || "Registration failed. Please try again.";
+    var users = readUsers();
+    if (users[name.toLowerCase()]) {
+      errBox.innerHTML = 'That name is already in use on this device. ' +
+        '<button type="button" class="np-link" id="register-try-login">Sign in instead?</button>';
       errBox.classList.add("is-visible");
+      var btn = document.getElementById("register-try-login");
+      if (btn) btn.addEventListener("click", function () {
+        closeAllModals();
+        $("#signin-name").value = name;
+        openModal("modal-signin");
+      });
       return;
     }
 
-    finishAuth(apiUser, email, phone, true);
+    var externalId = gen8CharUuid();
+    users[name.toLowerCase()] = externalId;
+    writeUsers(users);
+
+    finishAuth({ external_id: externalId, username: name, created_at: new Date().toISOString() }, email, phone, true);
   });
 
-  // Shared helper to complete auth after a successful register or login API call.
+  // ===========================================================
+  // Sign in (returning user)
+  // ===========================================================
+  $("#form-signin").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var errBox = $("#signin-error"); errBox.classList.remove("is-visible");
+    var name = $("#signin-name").value.trim();
+    if (!name) {
+      errBox.textContent = "Please enter your name to sign in.";
+      errBox.classList.add("is-visible");
+      return;
+    }
+    var users = readUsers();
+    var externalId = users[name.toLowerCase()];
+    if (!externalId) {
+      errBox.innerHTML = 'No account found for that name on this device. ' +
+        '<button type="button" class="np-link" id="signin-try-register">Create one?</button>';
+      errBox.classList.add("is-visible");
+      var btn = document.getElementById("signin-try-register");
+      if (btn) btn.addEventListener("click", function () {
+        closeAllModals();
+        $("#register-name").value = name;
+        openModal("modal-register");
+      });
+      return;
+    }
+    var stored = readJSON(KEY_PROFILE);
+    var email  = stored ? stored.email || "" : "";
+    var phone  = stored ? stored.phone || "" : "";
+    finishAuth({ external_id: externalId, username: name, created_at: stored && stored.registeredAt }, email, phone, false);
+  });
+
+  // ===========================================================
+  // finishAuth — shared by register + signin.
+  // This is where the brief's authenticated identity step happens:
+  //   - we persist the external_id in localStorage
+  //   - we call osLogin(externalId), which (after the OneSignal
+  //     init + anonymous addTags have completed) invokes
+  //     OneSignal.login(externalId) so OneSignal stitches the
+  //     anonymous session onto this authenticated user
+  //   - email + phone (if present) call addEmail / addSms
+  //   - registration tags + a user_login event fire AFTER login
+  // ===========================================================
   function finishAuth(apiUser, email, phone, isNewAccount) {
-    const externalId = apiUser.external_id;
-    const name       = apiUser.username;
+    var externalId = apiUser.external_id;
+    var name       = apiUser.username;
     window.localStorage.setItem(KEY_UUID, externalId);
 
-    const profile = {
-      name, email, phone, externalId,
-      registeredAt: apiUser.created_at || new Date().toISOString()
-    };
+    var profile = { name: name, email: email, phone: phone, externalId: externalId,
+                    registeredAt: apiUser.created_at || new Date().toISOString() };
     window.localStorage.setItem(KEY_PROFILE, JSON.stringify(profile));
 
     if (isNewAccount) {
-      // Reset streak / tier for a fresh account.
-      state.streak = { lastClaimDate: null, days: 0 };
+      state.streak     = { lastClaimDate: null, days: 0 };
       state.customTags = [];
       window.localStorage.setItem(KEY_STREAK, JSON.stringify(state.streak));
-      window.localStorage.setItem(KEY_TAGS, JSON.stringify(state.customTags));
+      window.localStorage.setItem(KEY_TAGS,   JSON.stringify(state.customTags));
     } else {
-      // Restore streak / tags for returning user.
       state.streak     = readJSON(KEY_STREAK) || { lastClaimDate: null, days: 0 };
       state.customTags = readJSON(KEY_TAGS)   || [];
     }
 
-    // OneSignal — login + optional contact channels + tags.
+    /* (a) STITCH — link the anonymous session (created by OneSignal.init
+       at page load) and any anonymous tags onto this external_id. */
     osLogin(externalId);
+
+    /* (b) optional contact channels — only call when a value exists */
     osAddEmail(email);
     osAddSms(phone);
 
-    if (isNewAccount) {
-      osAddTags({
-        registration_year:    String(new Date().getFullYear()),
-        account_type:         "free",
-        player_level:         "beginner",
-        referral_source:      "organic",
-        newsletter_opted_in:  "false",
-        onboarding_completed: "true",
-        loyalty_tier:         "bronze",
-        neopoints_balance:    "2500",
-        nc_balance:           "150",
-        daily_streak_days:    "0",
-        last_login_date:      todayISO(),
-        last_played:          todayISO()
-      });
-    } else {
-      osAddTags({
-        last_login_date:        todayISO(),
-        last_played:            todayISO(),
-        days_since_last_login:  String(daysSince(state.streak.lastClaimDate))
-      });
-    }
-
-    osTrack("user_login", {
-      platform:              "web_app",
-      device_type:           /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile_web" : "desktop",
-      session_start_time:    new Date().toISOString(),
-      days_since_last_login: isNewAccount ? 0 : daysSince(state.streak.lastClaimDate)
-    });
-
+    /* (c) authenticated user state. We set ONLY the four customer-facing
+       tags listed in the brief — player_level, currency_balance,
+       last_played, account_type. Every other tag is intentionally absent. */
     state.user     = profile;
     state.isAuthed = true;
     state.tier     = isNewAccount ? "bronze" : tierForStreak(state.streak.days);
+    window.localStorage.setItem(KEY_TIER, state.tier);
+
+    if (isNewAccount) {
+      var initialBalance = ((window.THEME_CONFIG && window.THEME_CONFIG.economy && window.THEME_CONFIG.economy.initialBalance) | 0) || 2500;
+      setPlayerLevel(1);                   // player_level
+      setCurrencyBalance(initialBalance);  // currency_balance
+      setLastPlayedToday();                // last_played
+      setAccountType("free");              // account_type
+      state.firstGameDone = false;
+      window.localStorage.removeItem(KEY_FIRSTGAME);
+    } else {
+      // Returning user: rehydrate from storage, then re-emit the tags so
+      // they're synced on the OneSignal side after the login() call.
+      state.balance       = parseInt(window.localStorage.getItem(KEY_BALANCE)   || "2500", 10);
+      state.playerLevel   = parseInt(window.localStorage.getItem(KEY_PLAYERLVL) || "1", 10);
+      state.isPremium     = window.localStorage.getItem(KEY_PREMIUM)   === "true";
+      state.firstGameDone = window.localStorage.getItem(KEY_FIRSTGAME) === "true";
+      setPlayerLevel(state.playerLevel);
+      setCurrencyBalance(state.balance);
+      setLastPlayedToday();
+      setAccountType(state.isPremium ? "premium" : "free");
+    }
 
     closeAllModals();
     applyAuthState();
-    showStitchBanner(email);
-    toast(isNewAccount
-      ? "Welcome to Neopia, " + name + "!"
-      : "Signed in. Cross-device sync on.");
+    showStitchBanner();
   }
 
-  $("#form-signin").addEventListener("submit", async e => {
-    e.preventDefault();
-    const errBox = $("#signin-error");
-    errBox.classList.remove("is-visible");
-
-    const email = $("#signin-email").value.trim();
-    const name  = $("#signin-name").value.trim();
-
-    if (!email || !name) {
-      errBox.textContent = "Please enter both your email and name to sign in.";
-      errBox.classList.add("is-visible");
-      return;
-    }
-
-    let apiUser;
-    try {
-      apiUser = await apiCall("POST", "/users/login", {
-        username: name, app_id: APP_ID
-      });
-    } catch (err) {
-      // User not found — offer to register instead.
-      if (err.status === 404) {
-        errBox.innerHTML =
-          'No account found for that name. <button type="button" id="signin-try-register" ' +
-          'style="color:var(--np-orange);text-decoration:underline;background:none;border:none;cursor:pointer;">' +
-          'Create one?</button>';
-        errBox.classList.add("is-visible");
-        const regBtn = document.getElementById("signin-try-register");
-        if (regBtn) regBtn.addEventListener("click", () => {
-          closeAllModals();
-          $("#register-name").value = name;
-          $("#register-email").value = email;
-          openModal("modal-register");
-        });
-        return;
-      }
-      errBox.textContent = err.message || "Sign-in failed. Please try again.";
-      errBox.classList.add("is-visible");
-      return;
-    }
-
-    // Use the stored phone from localStorage if available.
-    const stored = readJSON(KEY_PROFILE);
-    const phone  = stored ? stored.phone || "" : "";
-
-    finishAuth(apiUser, email, phone, false);
-  });
-
-  $("#btn-logout").addEventListener("click", async () => {
-    const externalId = window.localStorage.getItem(KEY_UUID);
-
-    // Call server-side logout (fire-and-forget — don't block UI on failure).
-    if (externalId) {
-      apiCall("POST", "/users/logout", {
-        external_id: externalId, app_id: APP_ID
-      }).catch(err => console.warn("[API] logout error:", err.message));
-    }
-
+  // ===========================================================
+  // Logout
+  // ===========================================================
+  $("#btn-logout").addEventListener("click", function () {
     osLogout();
     window.localStorage.removeItem(KEY_UUID);
     window.localStorage.removeItem(KEY_PROFILE);
-    // Streak and custom-tag history stay in storage so the next sign-in
-    // picks them back up.
-    state.user     = null;
-    state.isAuthed = false;
+    state.user        = null;
+    state.isAuthed    = false;
+    state.balance     = 0;
+    state.playerLevel = 1;
+    state.isPremium   = false;
+    state.quest       = { sacrificed: [], totalNeeded: 0, completed: false };
     closeAllModals();
     applyAuthState();
     toast("Signed out.");
   });
 
-  // ----------------------------------------------------------
-  // Account view
-  // ----------------------------------------------------------
-  $("#form-email").addEventListener("submit", e => {
+  // ===========================================================
+  // Account form handlers
+  // ===========================================================
+  $("#form-email").addEventListener("submit", function (e) {
     e.preventDefault();
-    const email = $("#account-email").value.trim();
+    var email = $("#account-email").value.trim();
     if (!email) { toast("Enter an email first."); return; }
     osAddEmail(email);
-    state.user.email = email;
-    persistProfile();
-    osTrack("preferences_updated", {
-      fields_changed: "email",
-      timestamp:      new Date().toISOString()
-    });
+    state.user.email = email; persistProfile();
     toast("Email saved → addEmail() fired.");
-    showStitchBanner(email);
   });
-
-  $("#form-phone").addEventListener("submit", e => {
+  $("#form-phone").addEventListener("submit", function (e) {
     e.preventDefault();
-    const phone = $("#account-phone").value.trim();
+    var phone = $("#account-phone").value.trim();
     if (!phone) { toast("Enter a phone number first."); return; }
-    if (!/^\+\d{6,15}$/.test(phone)) {
-      toast("Phone must be in E.164 format (e.g. +15551234567).");
-      return;
-    }
+    if (!/^\+\d{6,15}$/.test(phone)) { toast("Phone must be E.164 (e.g. +15551234567)."); return; }
     osAddSms(phone);
-    state.user.phone = phone;
-    persistProfile();
-    osTrack("preferences_updated", {
-      fields_changed: "phone",
-      timestamp:      new Date().toISOString()
-    });
+    state.user.phone = phone; persistProfile();
     toast("Mobile saved → addSms() fired.");
   });
-
-  $("#form-tag").addEventListener("submit", e => {
+  // Custom-tag form — this still calls addTags() with a free-form key/value
+  // because that's the SE-skill-mandated SE demo affordance. The four named
+  // tags above are the customer's PRESCRIBED schema; the custom-tag form is
+  // an SE testing tool for live demos. The SE simply has to use one of the
+  // four key names if they want to demo the customer's actual schema.
+  $("#form-tag").addEventListener("submit", function (e) {
     e.preventDefault();
-    const k = $("#tag-key").value.trim();
-    const v = $("#tag-val").value.trim();
+    var k = $("#tag-key").value.trim();
+    var v = $("#tag-val").value.trim();
     if (!k) { toast("Tag key is required."); return; }
-    osAddTags({ [k]: v });
+    var tag = {}; tag[k] = v;
+    osAddTags(tag);
     state.customTags.unshift({ key: k, value: v });
     if (state.customTags.length > 10) state.customTags.pop();
     window.localStorage.setItem(KEY_TAGS, JSON.stringify(state.customTags));
-    osTrack("preferences_updated", {
-      fields_changed: "custom_tag:" + k,
-      timestamp:      new Date().toISOString()
-    });
-    $("#tag-key").value = "";
-    $("#tag-val").value = "";
+    $("#tag-key").value = ""; $("#tag-val").value = "";
     renderTagHistory();
     toast("Tag saved → addTags({ " + k + ": " + v + " }).");
   });
 
-  // ----------------------------------------------------------
+  // ===========================================================
   // Daily reward claim
-  // ----------------------------------------------------------
-  $("#btn-claim-daily").addEventListener("click", () => {
-    if (!state.isAuthed) {
-      openModal("modal-auth-choose");
-      toast("Sign in to claim your daily reward.");
-      return;
-    }
-    const today = todayISO();
-    if (state.streak.lastClaimDate === today) {
-      toast("You've already claimed today's reward.");
-      return;
-    }
-    // Increment streak (continue if yesterday, otherwise restart at 1).
-    const yest = isoDaysAgo(1);
+  // ===========================================================
+  $("#btn-claim-daily").addEventListener("click", function () {
+    if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in to claim your daily reward."); return; }
+    var today = todayISO();
+    if (state.streak.lastClaimDate === today) { toast("You've already claimed today."); return; }
+
+    var yest = isoDaysAgo(1);
     state.streak.days = state.streak.lastClaimDate === yest ? state.streak.days + 1 : 1;
     state.streak.lastClaimDate = today;
     window.localStorage.setItem(KEY_STREAK, JSON.stringify(state.streak));
 
-    const dayInStreak = ((state.streak.days - 1) % 7) + 1;
-    const reward      = STREAK_REWARDS[dayInStreak - 1];
-    const newTier     = tierForStreak(state.streak.days);
-    const tierChanged = newTier !== state.tier;
+    var rewards = (window.THEME_CONFIG && window.THEME_CONFIG.streakRewards) || [];
+    var dayInStreak = ((state.streak.days - 1) % 7) + 1;
+    var reward = rewards[dayInStreak - 1] || { label: "Reward", amount: 100, type: "coins" };
+
+    // Tier display state stays in localStorage but is NOT a tag — the
+    // customer's tag schema doesn't include loyalty_tier.
+    var newTier = tierForStreak(state.streak.days);
+    var tierChanged = newTier !== state.tier;
     state.tier = newTier;
     window.localStorage.setItem(KEY_TIER, newTier);
 
-    osAddTags({
-      daily_streak_days: String(state.streak.days),
-      last_login_date:   today,
-      last_played:       today,
-      neopoints_balance: String(2500 + state.streak.days * 100),
-      loyalty_tier:      newTier
-    });
+    // Tag updates (only the 4 customer tags):
+    setCurrencyBalance(state.balance + reward.amount, "daily_reward_claim");
+    setLastPlayedToday();
+
+    // Event with the exact property schema requested:
     osTrack("daily_reward_claimed", {
-      day_in_streak: dayInStreak,
-      streak_days:   state.streak.days,
-      reward_name:   reward.label,
-      reward_type:   reward.type
+      reward_type:  reward.type,
+      reward_value: reward.amount,
+      day_streak:   state.streak.days,
+      source:       "home_streak_card"
     });
 
-    renderHomeForUser();
-    renderStreakGrid();
-    renderRewardsGrid();
+    renderHomeForUser(); renderStreakGrid(); renderRewardsGrid();
 
-    if (tierChanged) {
-      toast("Tier up! You're now " + tierDisplay(newTier) + ".");
-    } else {
-      toast("Claimed " + reward.label + " — streak " + state.streak.days + " day" + (state.streak.days === 1 ? "" : "s") + "!");
-    }
+    if (tierChanged) toast("Tier up! You're now " + cap(newTier) + ".");
+    else             toast("Claimed " + reward.label + " — streak " + state.streak.days + " day" + (state.streak.days === 1 ? "" : "s") + "!");
   });
 
-  // ----------------------------------------------------------
-  // Rewards Hub redeem
-  // ----------------------------------------------------------
-  function redeemReward(rewardId) {
-    if (!state.isAuthed) {
-      openModal("modal-auth-choose");
-      toast("Sign in to redeem rewards.");
-      return;
-    }
-    const reward = LOYALTY_REWARDS.find(r => r.id === rewardId);
-    if (!reward) return;
-    const userTierIdx = TIER_ORDER.indexOf(state.tier);
-    const reqTierIdx  = TIER_ORDER.indexOf(reward.tier);
-    if (userTierIdx < reqTierIdx) {
-      toast("Reach " + tierDisplay(reward.tier) + " tier to unlock this reward.");
-      return;
-    }
-    osTrack("reward_redeemed", {
-      reward_id:     reward.id,
-      reward_name:   reward.name,
-      points_cost:   reward.points,
-      tier_required: reward.tier
+  // ===========================================================
+  // Game / Play screen
+  // ===========================================================
+  function startTrial() {
+    if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in to play."); return; }
+    var ps = (window.THEME_CONFIG && window.THEME_CONFIG.playScreen) || { targetScore: 500 };
+    state.play = { score: 0, startedAt: Date.now(), isPlaying: true, completed: false };
+    setText("play-score", "Score: 0 / " + ps.targetScore);
+    setText("play-status", "Playing… tap Complete trial when ready.");
+    document.getElementById("play-bar").style.width = "0%";
+    document.getElementById("btn-play-start").hidden    = true;
+    document.getElementById("btn-play-complete").hidden = false;
+    document.getElementById("btn-play-retry").hidden    = true;
+
+    // simulate a quick score climb (no event fires here — the customer
+    // schema only includes game_session_completed, not a session_started).
+    var start = state.play.startedAt;
+    var iv = setInterval(function () {
+      if (!state.play.isPlaying) { clearInterval(iv); return; }
+      var elapsed = (Date.now() - start) / 1000;
+      var sc = Math.min(ps.targetScore, Math.round(elapsed * 80));
+      state.play.score = sc;
+      setText("play-score", "Score: " + sc + " / " + ps.targetScore);
+      document.getElementById("play-bar").style.width = ((sc / ps.targetScore) * 100) + "%";
+      if (sc >= ps.targetScore) { clearInterval(iv); }
+    }, 100);
+  }
+
+  function completeTrial() {
+    var ps = (window.THEME_CONFIG && window.THEME_CONFIG.playScreen) || { targetScore: 500, rewardAmount: 250, levelNumber: 1, levelName: "Level 1" };
+    state.play.isPlaying = false;
+    state.play.completed = true;
+    var passed = state.play.score >= ps.targetScore;
+    var durationSeconds = Math.max(1, Math.round((Date.now() - (state.play.startedAt || Date.now())) / 1000));
+    var pointsEarned    = passed ? ps.rewardAmount : 0;
+    var currencySymbol  = (window.THEME_CONFIG && window.THEME_CONFIG.currency && window.THEME_CONFIG.currency.primary && window.THEME_CONFIG.currency.primary.symbol) || "★";
+
+    setText("play-status", passed ? "Trial complete! +" + pointsEarned + " " + currencySymbol : "Score too low — try again.");
+    document.getElementById("btn-play-complete").hidden = true;
+    document.getElementById("btn-play-retry").hidden    = false;
+
+    // Event with the exact property schema requested:
+    osTrack("game_session_completed", {
+      game_name:        ps.levelName,
+      score:            state.play.score,
+      duration_seconds: durationSeconds,
+      points_earned:    pointsEarned
     });
+
+    if (passed) {
+      // Tag updates (only customer schema):
+      setPlayerLevel(state.playerLevel + 1);                          // player_level
+      setCurrencyBalance(state.balance + pointsEarned, "game_win");   // currency_balance
+      setLastPlayedToday();                                           // last_played
+      toast("Trial complete! +" + pointsEarned + " " + currencySymbol);
+    }
+
+    // show_prompt In-App trigger — fires only after the FIRST game
+    // session ever completes for this user. Subsequent sessions don't
+    // re-fire the trigger (the dashboard message is already configured
+    // with the trigger condition; we only need it to evaluate once).
+    if (!state.firstGameDone) {
+      state.firstGameDone = true;
+      window.localStorage.setItem(KEY_FIRSTGAME, "true");
+      osAddTrigger("show_prompt", "true");
+    }
+  }
+  function retryTrial() { startTrial(); }
+  document.getElementById("btn-play-start").addEventListener("click",    startTrial);
+  document.getElementById("btn-play-complete").addEventListener("click", completeTrial);
+  document.getElementById("btn-play-retry").addEventListener("click",    retryTrial);
+
+  // ===========================================================
+  // Quest panel — drives the quest_completed event.
+  // The "items_sacrificed" property in the brief is satisfied by
+  // having the user click each item chip (one click per item).
+  // The Complete-quest button enables once all items are clicked.
+  // ===========================================================
+  function renderQuest() {
+    var qp = (window.THEME_CONFIG && window.THEME_CONFIG.questPanel) || { sacrificeItems: [], questName: "Quest" };
+    var items = qp.sacrificeItems || [];
+    state.quest = { sacrificed: state.quest.sacrificed || [], totalNeeded: items.length, completed: state.quest.completed || false };
+    setText("quest-title", (window.THEME_CONFIG && window.THEME_CONFIG.copy && window.THEME_CONFIG.copy.questPanelTitle) || "Quest");
+    setText("quest-sub",   (window.THEME_CONFIG && window.THEME_CONFIG.copy && window.THEME_CONFIG.copy.questPanelSub)   || "");
+    setText("btn-quest-complete", (window.THEME_CONFIG && window.THEME_CONFIG.copy && window.THEME_CONFIG.copy.questCompleteCta) || "Complete quest");
+
+    var chips = items.map(function (it) {
+      var done = state.quest.sacrificed.indexOf(it) !== -1;
+      var bg   = done ? "var(--color-success)" : "var(--color-primary-light)";
+      var fg   = done ? "#fff"                   : "var(--color-primary-dark)";
+      return '<button type="button" class="np-tag-chip" data-quest-item="' + escapeHtml(it) + '" style="background:' + bg + ';color:' + fg + ';cursor:pointer;border:none;">' +
+                (done ? "✓ " : "")
+                + escapeHtml(it) +
+              '</button>';
+    });
+    document.getElementById("quest-items").innerHTML = chips.join("");
+    var pct = state.quest.totalNeeded ? (state.quest.sacrificed.length / state.quest.totalNeeded) * 100 : 0;
+    document.getElementById("quest-bar").style.width = pct + "%";
+    var statusEl = document.getElementById("quest-status");
+    if (state.quest.completed) {
+      setText("quest-status", (window.THEME_CONFIG && window.THEME_CONFIG.copy && window.THEME_CONFIG.copy.questCompletedNote) || "Quest complete.");
+    } else {
+      setText("quest-status", "Sacrificed " + state.quest.sacrificed.length + " / " + state.quest.totalNeeded + " items.");
+    }
+    var btn = document.getElementById("btn-quest-complete");
+    btn.disabled = state.quest.completed || state.quest.sacrificed.length < state.quest.totalNeeded;
+
+    // Wire item clicks (idempotent — fresh listeners each render).
+    document.querySelectorAll("[data-quest-item]").forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in to play."); return; }
+        if (state.quest.completed) return;
+        var it = chip.dataset.questItem;
+        if (state.quest.sacrificed.indexOf(it) === -1) {
+          state.quest.sacrificed.push(it);
+          renderQuest();
+        }
+      });
+    });
+  }
+  document.getElementById("btn-quest-complete").addEventListener("click", function () {
+    if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in to play."); return; }
+    var qp = (window.THEME_CONFIG && window.THEME_CONFIG.questPanel) || {};
+    if (state.quest.sacrificed.length < state.quest.totalNeeded) {
+      toast("Sacrifice every item before completing.");
+      return;
+    }
+    // Event with the exact property schema requested:
+    osTrack("quest_completed", {
+      quest_name:        qp.questName       || "Quest",
+      reward_name:       qp.rewardName      || "Reward",
+      difficulty:        qp.difficulty      || "easy",
+      items_sacrificed:  state.quest.sacrificed.slice()
+    });
+    // Reward the user — currency_balance + last_played + player_level updates.
+    var bonus = (qp.rewardCurrency | 0) || 0;
+    if (bonus > 0) setCurrencyBalance(state.balance + bonus, "quest_completed");
+    setLastPlayedToday();
+    setPlayerLevel(state.playerLevel + 1);
+    state.quest.completed = true;
+    toast("Quest complete! Earned " + (qp.rewardName || "reward") + (bonus ? " + " + bonus + " currency." : "."));
+    renderQuest();
+  });
+
+  // ===========================================================
+  // Premium upgrade — toggles account_type tag.
+  // ===========================================================
+  function renderPremiumState() {
+    var statusEl = document.getElementById("premium-status-text");
+    var upgrade  = document.getElementById("btn-upgrade-premium");
+    var downgrade= document.getElementById("btn-downgrade-premium");
+    if (!statusEl || !upgrade || !downgrade) return;
+    if (state.isPremium) {
+      var copy = (window.THEME_CONFIG && window.THEME_CONFIG.copy) || {};
+      statusEl.textContent = copy.premiumActiveLabel || "Premium hero — thank you!";
+      upgrade.hidden   = true;
+      downgrade.hidden = false;
+    } else {
+      statusEl.textContent = "Currently: free";
+      upgrade.hidden   = false;
+      downgrade.hidden = true;
+    }
+  }
+  document.getElementById("btn-upgrade-premium").addEventListener("click", function () {
+    if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in first."); return; }
+    setAccountType("premium");
+    toast("Upgraded → account_type:premium");
+  });
+  document.getElementById("btn-downgrade-premium").addEventListener("click", function () {
+    if (!state.isAuthed) return;
+    setAccountType("free");
+    toast("Downgraded → account_type:free");
+  });
+
+  // ===========================================================
+  // Rewards Hub redeem
+  // ===========================================================
+  function redeemReward(rewardId) {
+    if (!state.isAuthed) { openModal("modal-auth-choose"); toast("Sign in to redeem rewards."); return; }
+    var rewards = (window.THEME_CONFIG && window.THEME_CONFIG.loyaltyRewards) || [];
+    var reward = rewards.filter(function (r) { return r.id === rewardId; })[0];
+    if (!reward) return;
+    var tiers  = (window.THEME_CONFIG && window.THEME_CONFIG.loyaltyTiers) || ["bronze","silver","gold","platinum"];
+    if (tiers.indexOf(state.tier) < tiers.indexOf(reward.tier)) {
+      toast("Reach " + cap(reward.tier) + " tier to unlock this reward.");
+      return;
+    }
+    if (state.balance < reward.points) {
+      toast("Not enough currency. Need " + numberFmt(reward.points) + ".");
+      return;
+    }
+
+    var currencyType = ((window.THEME_CONFIG && window.THEME_CONFIG.economy && window.THEME_CONFIG.economy.primaryCurrencyType)) || "primary";
+
+    // Event with the exact property schema requested:
+    osTrack("item_purchased", {
+      item_name:     reward.name,
+      item_category: reward.tier,             // bronze | silver | gold | platinum
+      currency_type: currencyType,            // "primary" or "premium"
+      cost:          reward.points
+    });
+
+    // Spend — setCurrencyBalance() handles the addTags() update AND
+    // fires the low_currency trigger if the new balance < threshold.
+    setCurrencyBalance(state.balance - reward.points, "item_purchased:" + reward.id);
+    setLastPlayedToday();
+
     toast("Redeemed " + reward.name + "!");
   }
 
-  // ----------------------------------------------------------
+  // ===========================================================
   // Render helpers
-  // ----------------------------------------------------------
+  // ===========================================================
   function renderStreakGrid() {
-    const grid = $("#streak-grid");
-    const claimedDays = ((state.streak.days % 7) || (state.streak.days ? 7 : 0));
-    const todayClaimed = state.streak.lastClaimDate === todayISO();
-    grid.innerHTML = STREAK_REWARDS.map(r => {
-      const isClaimed = r.day <= claimedDays && (r.day < claimedDays || todayClaimed);
-      const isToday   = !isClaimed && r.day === claimedDays + 1;
-      const cls = ["np-streak__cell"];
+    var rewards = (window.THEME_CONFIG && window.THEME_CONFIG.streakRewards) || [];
+    var grid = document.getElementById("streak-grid");
+    var claimedDays = ((state.streak.days % 7) || (state.streak.days ? 7 : 0));
+    var todayClaimed = state.streak.lastClaimDate === todayISO();
+    grid.innerHTML = rewards.map(function (r) {
+      var isClaimed = r.day <= claimedDays && (r.day < claimedDays || todayClaimed);
+      var isToday   = !isClaimed && r.day === claimedDays + 1;
+      var cls = ["np-streak__cell"];
       if (isClaimed) cls.push("is-claimed");
       if (isToday)   cls.push("is-today");
-      return `
-        <div class="${cls.join(" ")}">
-          <div class="np-streak__day">Day ${r.day}</div>
-          <div class="np-streak__reward">${r.label}</div>
-          ${isClaimed ? '<div class="np-streak__check">✓</div>' : ''}
-        </div>`;
+      return '<div class="' + cls.join(" ") + '">' +
+               '<div class="np-streak__day">Day ' + r.day + '</div>' +
+               '<div class="np-streak__reward">' + r.label + '</div>' +
+               (isClaimed ? '<div class="np-streak__check">✓</div>' : '') +
+             '</div>';
     }).join("");
   }
-
   function renderRewardsGrid() {
-    const grid = $("#rewards-grid");
-    const userTierIdx = TIER_ORDER.indexOf(state.tier);
-    grid.innerHTML = LOYALTY_REWARDS.map(r => {
-      const reqIdx  = TIER_ORDER.indexOf(r.tier);
-      const locked  = userTierIdx < reqIdx;
-      const btnLabel = locked ? "Locked — " + tierDisplay(r.tier) + " tier" : "Redeem";
-      return `
-        <div class="np-reward${locked ? " is-locked" : ""}">
-          <div class="np-reward__top">
-            <div class="np-reward__icon">${r.icon}</div>
-            <div>
-              <div class="np-reward__tier">${tierDisplay(r.tier)} tier</div>
-              <div class="np-reward__name">${r.name}</div>
-            </div>
-          </div>
-          <div class="np-reward__desc">${r.desc}</div>
-          <div class="np-reward__cost">
-            <span class="np-reward__price">★ ${r.points.toLocaleString()} NP</span>
-            <button class="np-pill np-pill--grape" data-reward="${r.id}" ${locked ? "disabled" : ""}>
-              ${btnLabel}
-            </button>
-          </div>
-        </div>`;
+    var rewards = (window.THEME_CONFIG && window.THEME_CONFIG.loyaltyRewards) || [];
+    var tiers   = (window.THEME_CONFIG && window.THEME_CONFIG.loyaltyTiers) || ["bronze","silver","gold","platinum"];
+    var html = rewards.map(function (r) {
+      var locked = tiers.indexOf(state.tier) < tiers.indexOf(r.tier);
+      var btnLabel = locked ? "Locked — " + cap(r.tier) + " tier" : "Redeem";
+      return '<div class="np-reward' + (locked ? " is-locked" : "") + '">' +
+               '<div class="np-reward__top">' +
+                 '<div class="np-reward__icon">' + r.icon + '</div>' +
+                 '<div>' +
+                   '<div class="np-reward__tier">' + cap(r.tier) + ' tier</div>' +
+                   '<div class="np-reward__name">' + r.name + '</div>' +
+                 '</div>' +
+               '</div>' +
+               '<div class="np-reward__desc">' + r.desc + '</div>' +
+               '<div class="np-reward__cost">' +
+                 '<span class="np-reward__price">★ ' + numberFmt(r.points) + '</span>' +
+                 '<button class="np-pill np-pill--grape np-pill--small" data-reward="' + r.id + '" ' + (locked ? "disabled" : "") + '>' + btnLabel + '</button>' +
+               '</div>' +
+             '</div>';
     }).join("");
-    grid.querySelectorAll("[data-reward]").forEach(btn => {
-      btn.addEventListener("click", () => redeemReward(btn.dataset.reward));
+    document.getElementById("rewards-grid").innerHTML   = html;
+    document.getElementById("rewards-grid-2").innerHTML = html;
+    [document.getElementById("rewards-grid"), document.getElementById("rewards-grid-2")].forEach(function (g) {
+      if (!g) return;
+      g.querySelectorAll("[data-reward]").forEach(function (btn) {
+        btn.addEventListener("click", function () { redeemReward(btn.dataset.reward); });
+      });
     });
   }
-
-  function renderTagHistory() {
-    const list = $("#tag-history");
-    list.innerHTML = state.customTags
-      .map(t => `<span class="np-tag-chip">${escapeHtml(t.key)} : ${escapeHtml(t.value)}</span>`)
-      .join("");
+  function renderGames() {
+    var games = (window.THEME_CONFIG && window.THEME_CONFIG.games) || [];
+    document.getElementById("games-grid").innerHTML = games.map(function (g) {
+      return '<div class="np-game">' +
+               '<img class="np-game__thumb" src="' + g.thumb + '" alt="' + g.name + '">' +
+               '<div class="np-game__meta">' +
+                 '<div class="np-game__genre">' + g.genre + '</div>' +
+                 '<div class="np-game__name">' + g.name + '</div>' +
+                 '<div class="np-game__row">' +
+                   '<span class="np-game__players">' + g.players + '</span>' +
+                   '<button class="np-pill np-pill--grape np-pill--small" data-route="game">Play</button>' +
+                 '</div>' +
+               '</div>' +
+             '</div>';
+    }).join("");
   }
-
+  function renderTagHistory() {
+    var list = document.getElementById("tag-history");
+    list.innerHTML = state.customTags.map(function (t) {
+      return '<span class="np-tag-chip">' + escapeHtml(t.key) + ' : ' + escapeHtml(t.value) + '</span>';
+    }).join("");
+  }
   function renderHomeForUser() {
+    var copy = (window.THEME_CONFIG && window.THEME_CONFIG.copy) || {};
     if (state.isAuthed && state.user) {
-      $("#hero-sub").textContent = "Welcome back, " + state.user.name + "! Your daily reward is waiting.";
-      $("#streak-sub").textContent = "Streak: " + state.streak.days + " day" + (state.streak.days === 1 ? "" : "s");
-      $("#tier-sub").textContent = tierDisplay(state.tier) + " tier";
-      $("#tier-name").textContent = tierDisplay(state.tier) + " tier";
-      $("#balance-np").textContent = (2500 + state.streak.days * 100).toLocaleString();
-      $("#daily-sub").textContent =
-        state.streak.lastClaimDate === todayISO()
-          ? "You've claimed today. Come back tomorrow to keep your streak alive!"
-          : "Log in every day to grow your streak and earn more Neopoints.";
-
-      $("#account-uuid").textContent  = state.user.externalId;
-      $("#account-tier").textContent  = tierDisplay(state.tier);
-      $("#account-streak").textContent = state.streak.days;
-      $("#account-name-sub").textContent = "Hi, " + state.user.name + "!";
+      var heroSub = (copy.heroSubAuthed || "Welcome back, {name}!").replace(/\{name\}/g, state.user.name);
+      setText("hero-sub", heroSub);
+      setText("balance-streak", String(state.streak.days));
+      setText("streak-sub", "Streak: " + state.streak.days + " day" + (state.streak.days === 1 ? "" : "s"));
+      setText("tier-sub", cap(state.tier) + " tier");
+      setText("tier-name", cap(state.tier));
+      setText("balance-np", numberFmt(state.balance));
+      var todayClaimed = state.streak.lastClaimDate === todayISO();
+      setText("daily-sub", todayClaimed ? (copy.streakSubClaimed || "You've claimed today.") : (copy.streakSubAuthed || "Log in every day to grow your streak."));
+      setText("account-uuid",  state.user.externalId);
+      setText("account-tier",  cap(state.tier));
+      setText("account-streak", String(state.streak.days));
+      setText("account-name-sub", state.user.name);
       $("#account-email").value = state.user.email || "";
       $("#account-phone").value = state.user.phone || "";
-      $("#account-chip-name").textContent = state.user.name;
-      $("#account-avatar").textContent = state.user.name.charAt(0).toUpperCase();
+      setText("account-chip-name", (copy.accountChipPrefix || "Hi,") + " " + state.user.name);
+      setText("account-avatar",    state.user.name.charAt(0).toUpperCase());
     } else {
-      $("#hero-sub").textContent = "Sign in to start earning Neopoints, claim daily rewards, and unlock loyalty perks.";
-      $("#streak-sub").textContent = "Sign in to claim daily";
-      $("#tier-sub").textContent = "Sign in to view tier";
-      $("#tier-name").textContent = "Bronze tier";
-      $("#balance-np").textContent = "2,500";
-      $("#daily-sub").textContent = "Sign in to start your streak.";
+      setText("hero-sub",       copy.heroSubAnon  || "Sign in to start.");
+      setText("balance-streak", "0");
+      setText("streak-sub",     copy.statsStreakAnon || "Sign in to claim daily");
+      setText("tier-sub",       copy.statsTierAnon   || "Sign in to view tier");
+      setText("tier-name",      "Bronze");
+      var primary = (window.THEME_CONFIG && window.THEME_CONFIG.currency && window.THEME_CONFIG.currency.primary) || {};
+      setText("balance-np",     numberFmt(parseInt(primary.balance || "2500", 10)));
+      setText("daily-sub",      copy.streakSubAnon || "Sign in to start your streak.");
     }
   }
 
@@ -1939,107 +1760,99 @@ footer.np-foot strong { color: var(--np-gold-500); }
     renderStreakGrid();
     renderRewardsGrid();
     renderTagHistory();
+    renderQuest();
+    renderPremiumState();
     syncSubscribeButton();
   }
 
-  // ----------------------------------------------------------
-  // Identity-stitch banner
-  // ----------------------------------------------------------
-  let stitchTimeout;
-  function showStitchBanner(email) {
-    if (!email) return;
-    const b = $("#stitch-banner");
+  // ===========================================================
+  // Stitch banner — visual proof of the anonymous → authed link
+  // ===========================================================
+  var stitchTimeout;
+  function showStitchBanner() {
+    var copy = (window.THEME_CONFIG && window.THEME_CONFIG.copy) || {};
+    var b = document.getElementById("stitch-banner");
+    setText("stitch-banner-text", copy.stitchBanner || "Anonymous session stitched to your authenticated user.");
     b.classList.add("is-visible");
     clearTimeout(stitchTimeout);
-    stitchTimeout = setTimeout(() => b.classList.remove("is-visible"), 6500);
+    stitchTimeout = setTimeout(function () { b.classList.remove("is-visible"); }, 6500);
   }
 
-  // ----------------------------------------------------------
-  // Session restore — runs on load
-  // ----------------------------------------------------------
-  async function restoreSession() {
-    const externalId = window.localStorage.getItem(KEY_UUID);
-    const profile    = readJSON(KEY_PROFILE);
+  // ===========================================================
+  // Session restore — runs on DOMContentLoaded.
+  // If a UUID is stored from a prior visit, we re-call osLogin()
+  // so the visitor is recognised on every page load. The withOneSignal()
+  // queue ensures the call still waits for init() + anonymous tags.
+  // ===========================================================
+  function restoreSession() {
+    var externalId = window.localStorage.getItem(KEY_UUID);
+    var profile    = readJSON(KEY_PROFILE);
 
     if (externalId && profile) {
-      // Verify the stored external_id is still valid on the server.
-      try {
-        await apiCall("GET", "/users/" + encodeURIComponent(externalId));
-      } catch (err) {
-        // User no longer valid on the server — clear local state.
-        console.warn("[API] session restore failed:", err.message);
-        window.localStorage.removeItem(KEY_UUID);
-        window.localStorage.removeItem(KEY_PROFILE);
-        applyAuthState();
-        return;
-      }
+      state.user          = profile;
+      state.isAuthed      = true;
+      state.streak        = readJSON(KEY_STREAK) || { lastClaimDate: null, days: 0 };
+      state.customTags    = readJSON(KEY_TAGS)   || [];
+      state.tier          = window.localStorage.getItem(KEY_TIER) || tierForStreak(state.streak.days);
+      state.balance       = parseInt(window.localStorage.getItem(KEY_BALANCE)   || "2500", 10);
+      state.playerLevel   = parseInt(window.localStorage.getItem(KEY_PLAYERLVL) || "1", 10);
+      state.firstGameDone = window.localStorage.getItem(KEY_FIRSTGAME) === "true";
+      state.isPremium     = window.localStorage.getItem(KEY_PREMIUM)   === "true";
 
-      state.user       = profile;
-      state.isAuthed   = true;
-      state.streak     = readJSON(KEY_STREAK) || { lastClaimDate: null, days: 0 };
-      state.customTags = readJSON(KEY_TAGS)   || [];
-      state.tier       = window.localStorage.getItem(KEY_TIER) || tierForStreak(state.streak.days);
-
-      // Re-establish identity with OneSignal on every page load.
+      // Re-stitch identity on every load.
       osLogin(externalId);
       if (profile.email) osAddEmail(profile.email);
       if (profile.phone) osAddSms(profile.phone);
-      osAddTags({
-        last_login_date:        todayISO(),
-        last_played:            todayISO(),
-        days_since_last_login:  String(daysSince(state.streak.lastClaimDate)),
-        loyalty_tier:           state.tier,
-        daily_streak_days:      String(state.streak.days)
-      });
-      osTrack("user_login", {
-        platform:              "web_app",
-        device_type:           /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile_web" : "desktop",
-        session_start_time:    new Date().toISOString(),
-        days_since_last_login: daysSince(state.streak.lastClaimDate)
-      });
+
+      // Re-emit only the four customer tags so they're synced after login.
+      // No user_login event — that name isn't in the customer's schema.
+      setPlayerLevel(state.playerLevel);
+      setCurrencyBalance(state.balance);
+      setLastPlayedToday();
+      setAccountType(state.isPremium ? "premium" : "free");
     }
+
+    renderGames();
     applyAuthState();
   }
 
-  // ----------------------------------------------------------
+  // ===========================================================
   // Utilities
-  // ----------------------------------------------------------
-  function readJSON(key) {
-    try { return JSON.parse(window.localStorage.getItem(key)); }
-    catch (_) { return null; }
-  }
-  function persistProfile() {
-    if (state.user) {
-      window.localStorage.setItem(KEY_PROFILE, JSON.stringify(state.user));
-    }
-  }
+  // ===========================================================
+  function readJSON(k) { try { return JSON.parse(window.localStorage.getItem(k)); } catch (_) { return null; } }
+  function persistProfile() { if (state.user) window.localStorage.setItem(KEY_PROFILE, JSON.stringify(state.user)); }
   function todayISO() {
-    const d = new Date();
-    return d.getUTCFullYear() + "-" +
-           pad(d.getUTCMonth() + 1) + "-" +
-           pad(d.getUTCDate());
+    var d = new Date();
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
   }
   function isoDaysAgo(n) {
-    const d = new Date();
-    d.setUTCDate(d.getUTCDate() - n);
+    var d = new Date(); d.setUTCDate(d.getUTCDate() - n);
     return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
   }
   function daysSince(iso) {
     if (!iso) return 0;
-    const a = new Date(iso + "T00:00:00Z");
-    const b = new Date(todayISO() + "T00:00:00Z");
+    var a = new Date(iso + "T00:00:00Z"), b = new Date(todayISO() + "T00:00:00Z");
     return Math.max(0, Math.round((b - a) / 86400000));
   }
-  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function pad(n)        { return n < 10 ? "0" + n : "" + n; }
+  function cap(s)        { return s.charAt(0).toUpperCase() + s.slice(1); }
+  function numberFmt(n)  { return Number(n).toLocaleString(); }
   function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => (
-      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
-    ));
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function tierForStreak(days) {
+    var th = (window.THEME_CONFIG && window.THEME_CONFIG.loyaltyTierThresholds) || { bronze: 0, silver: 7, gold: 14, platinum: 30 };
+    if (days >= (th.platinum || 30)) return "platinum";
+    if (days >= (th.gold     || 14)) return "gold";
+    if (days >= (th.silver   ||  7)) return "silver";
+    return "bronze";
   }
 
-  // ----------------------------------------------------------
+  // ===========================================================
   // Boot
-  // ----------------------------------------------------------
+  // ===========================================================
   document.addEventListener("DOMContentLoaded", restoreSession);
 })();
 </script>
