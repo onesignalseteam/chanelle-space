@@ -618,8 +618,9 @@ body.is-authed #btn-open-auth   { display: none; }
       <div id="register-error" class="np-error"></div>
       <form id="form-register" novalidate>
         <div class="np-field">
-          <label class="np-field__label" for="register-name">Name <span style="color:var(--color-danger);">*</span></label>
-          <input class="np-field__input" id="register-name" type="text" placeholder="What should we call you?" required>
+          <label class="np-field__label" for="register-username">Username <span style="color:var(--color-danger);">*</span></label>
+          <input class="np-field__input" id="register-username" type="text" placeholder="Pick a username" required>
+          <div class="np-field__hint">Used directly as your OneSignal external_id.</div>
         </div>
         <div class="np-field">
           <label class="np-field__label" for="register-email" id="register-email-label">Email (optional)</label>
@@ -650,9 +651,9 @@ body.is-authed #btn-open-auth   { display: none; }
       <div id="signin-error" class="np-error"></div>
       <form id="form-signin" novalidate>
         <div class="np-field">
-          <label class="np-field__label" for="signin-name">Name <span style="color:var(--color-danger);">*</span></label>
-          <input class="np-field__input" id="signin-name" type="text" placeholder="Your name on this device" required>
-          <div class="np-field__hint">We look up your stored UUID by name on this device.</div>
+          <label class="np-field__label" for="signin-username">Username <span style="color:var(--color-danger);">*</span></label>
+          <input class="np-field__input" id="signin-username" type="text" placeholder="Your username" required>
+          <div class="np-field__hint">Used directly as your OneSignal external_id.</div>
         </div>
         <div class="np-modal__footer">
           <button type="button" class="np-link" id="link-to-register">No account? Create one</button>
@@ -1048,12 +1049,15 @@ body.is-authed #btn-open-auth   { display: none; }
   // theme slug so two themes on the same browser don't collide.
   // ===========================================================
   var slug = (window.THEME_CONFIG && window.THEME_CONFIG.meta && window.THEME_CONFIG.meta.slug) || "default";
-  var KEY_UUID       = "onesignal_user_uuid";        // matches the SE skill spec
+  // KEY_UUID stores the OneSignal external_id. In this demo, the
+  // external_id IS the username the visitor typed at registration —
+  // there is no separate UUID. The localStorage key name is kept for
+  // continuity with the SE skill spec.
+  var KEY_UUID       = "onesignal_user_uuid";
   var KEY_PROFILE    = "demo_profile_"    + slug;    // { name, email, phone, externalId, registeredAt }
   var KEY_STREAK     = "demo_streak_"     + slug;    // { lastClaimDate, days }
   var KEY_TAGS       = "demo_tags_"       + slug;    // [{ key, value }] — for the account-view custom tag history
   var KEY_TIER       = "demo_tier_"       + slug;    // loyalty tier string
-  var KEY_USERS      = "demo_users_"      + slug;    // { name -> externalId }
   var KEY_BALANCE    = "demo_balance_"    + slug;    // currency_balance integer
   var KEY_PLAYERLVL  = "demo_player_lvl_" + slug;    // player_level integer
   var KEY_FIRSTGAME  = "demo_firstgame_"  + slug;    // "true" once first game session completes
@@ -1181,58 +1185,42 @@ body.is-authed #btn-open-auth   { display: none; }
   $("#btn-open-account").addEventListener("click", function () { if (state.isAuthed) openModal("modal-account"); });
 
   // ===========================================================
-  // UUID generator — 8 hex chars, per SE skill
-  // ===========================================================
-  function gen8CharUuid() {
-    var bytes = new Uint8Array(4);
-    (window.crypto || window.msCrypto).getRandomValues(bytes);
-    return Array.from(bytes).map(function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
-  }
-
-  // ===========================================================
-  // Local username -> externalId map (replaces API server)
-  // ===========================================================
-  function readUsers() {
-    try { return JSON.parse(window.localStorage.getItem(KEY_USERS) || "{}"); }
-    catch (_) { return {}; }
-  }
-  function writeUsers(u) { window.localStorage.setItem(KEY_USERS, JSON.stringify(u)); }
-
-  // ===========================================================
   // Register
   // ===========================================================
   $("#form-register").addEventListener("submit", function (e) {
     e.preventDefault();
     var errBox = $("#register-error"); errBox.classList.remove("is-visible");
-    var name  = $("#register-name").value.trim();
-    var email = $("#register-email").value.trim();
-    var phone = $("#register-phone").value.trim();
+    // Trim edge whitespace; otherwise send the username verbatim as
+    // the OneSignal external_id (Option B — light validation).
+    var username = $("#register-username").value.trim();
+    var email    = $("#register-email").value.trim();
+    var phone    = $("#register-phone").value.trim();
 
-    if (!name) {
-      errBox.textContent = "Please enter a name to continue.";
+    if (!username) {
+      errBox.textContent = "Please enter a username to continue.";
       errBox.classList.add("is-visible");
       return;
     }
 
-    var users = readUsers();
-    if (users[name.toLowerCase()]) {
-      errBox.innerHTML = 'That name is already in use on this device. ' +
+    // If a profile for this username already exists in localStorage on
+    // this device, offer the sign-in path instead of overwriting.
+    var existing = readJSON(KEY_PROFILE);
+    if (existing && existing.externalId === username) {
+      errBox.innerHTML = 'That username is already registered on this device. ' +
         '<button type="button" class="np-link" id="register-try-login">Sign in instead?</button>';
       errBox.classList.add("is-visible");
       var btn = document.getElementById("register-try-login");
       if (btn) btn.addEventListener("click", function () {
         closeAllModals();
-        $("#signin-name").value = name;
+        $("#signin-username").value = username;
         openModal("modal-signin");
       });
       return;
     }
 
-    var externalId = gen8CharUuid();
-    users[name.toLowerCase()] = externalId;
-    writeUsers(users);
-
-    finishAuth({ external_id: externalId, username: name, created_at: new Date().toISOString() }, email, phone, true);
+    // Username IS the external_id — pass it through both fields so
+    // OneSignal.login(username) is what runs downstream.
+    finishAuth({ external_id: username, username: username, created_at: new Date().toISOString() }, email, phone, true);
   });
 
   // ===========================================================
@@ -1241,30 +1229,26 @@ body.is-authed #btn-open-auth   { display: none; }
   $("#form-signin").addEventListener("submit", function (e) {
     e.preventDefault();
     var errBox = $("#signin-error"); errBox.classList.remove("is-visible");
-    var name = $("#signin-name").value.trim();
-    if (!name) {
-      errBox.textContent = "Please enter your name to sign in.";
+    var username = $("#signin-username").value.trim();
+    if (!username) {
+      errBox.textContent = "Please enter your username to sign in.";
       errBox.classList.add("is-visible");
       return;
     }
-    var users = readUsers();
-    var externalId = users[name.toLowerCase()];
-    if (!externalId) {
-      errBox.innerHTML = 'No account found for that name on this device. ' +
-        '<button type="button" class="np-link" id="signin-try-register">Create one?</button>';
-      errBox.classList.add("is-visible");
-      var btn = document.getElementById("signin-try-register");
-      if (btn) btn.addEventListener("click", function () {
-        closeAllModals();
-        $("#register-name").value = name;
-        openModal("modal-register");
-      });
-      return;
-    }
-    var stored = readJSON(KEY_PROFILE);
-    var email  = stored ? stored.email || "" : "";
-    var phone  = stored ? stored.phone || "" : "";
-    finishAuth({ external_id: externalId, username: name, created_at: stored && stored.registeredAt }, email, phone, false);
+    // Username IS the external_id. If a profile for this username
+    // is in localStorage, treat as a returning user (preserves streak,
+    // balance, tier, etc.). Otherwise OneSignal still recognises the
+    // user via login(username) — we just start UI state fresh.
+    var stored               = readJSON(KEY_PROFILE);
+    var isReturningOnDevice  = stored && stored.externalId === username;
+    var email = isReturningOnDevice ? (stored.email || "") : "";
+    var phone = isReturningOnDevice ? (stored.phone || "") : "";
+    finishAuth(
+      { external_id: username, username: username, created_at: isReturningOnDevice ? stored.registeredAt : new Date().toISOString() },
+      email,
+      phone,
+      !isReturningOnDevice                       // treat as new account if no matching local profile
+    );
   });
 
   // ===========================================================
